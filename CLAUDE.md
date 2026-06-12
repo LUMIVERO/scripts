@@ -42,4 +42,4 @@ When extending a script beyond detection (installing tools, configuring the mach
 
 ## Conventions
 
-- Commit messages are written in **German**.
+- Commit messages are written in **English**.
