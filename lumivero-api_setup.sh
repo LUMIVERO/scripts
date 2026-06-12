@@ -548,6 +548,26 @@ fix_az() {
   esac
 }
 
+# make — the build tool the lumivero-api workflow is driven through. It only
+# needs to be on PATH and runnable; `make --version` doubles as the probe and
+# supplies the version string shown beside the result.
+check_make() {
+  if ! have_cmd make; then
+    CHECK_DETAIL="not installed"
+    return 1
+  fi
+  _ver="$(make --version 2>/dev/null | head -n1)" || _ver=""
+  CHECK_DETAIL="${_ver:-installed}"
+  return 0
+}
+
+# Install make from the distro package: `apt-get update && apt-get install -y
+# make` on Debian/Ubuntu, Homebrew on macOS — install_pkg picks the right one
+# per OS_FAMILY.
+fix_make() {
+  install_pkg make make
+}
+
 # The Azure Container Registry every developer needs pull/push access to.
 ACR_NAME="uluruscacr"
 
@@ -1083,30 +1103,33 @@ main() {
   # 4. Azure CLI — installed and runnable.
   run_check "Azure CLI is installed and working" check_az fix_az required
 
-  # 5. Azure + ACR login — signed in and able to reach the uluruscacr registry.
+  # 5. make — the build tool the lumivero-api workflow is driven through.
+  run_check "make is installed" check_make fix_make required
+
+  # 6. Azure + ACR login — signed in and able to reach the uluruscacr registry.
   #    Depends on the Azure CLI (4) and Docker (2), so it comes last.
   run_check "Logged in to Azure and ACR uluruscacr accessible" check_acr fix_acr required
 
-  # 6. GitHub CLI — installed and authenticated (gh auth login).
+  # 7. GitHub CLI — installed and authenticated (gh auth login).
   run_check "GitHub CLI is installed and logged in" check_gh fix_gh required
 
-  # 7. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv and ~/.bash_profile from the
-  #    GitHub CLI credential (6), so it must come after it.
+  # 8. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv and ~/.bash_profile from the
+  #    GitHub CLI credential (7), so it must come after it.
   run_check "GITHUB_ACCESS_TOKEN is exported in your shell profile" check_github_token fix_github_token required
 
-  # 8. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv and
+  # 9. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv and
   #    ~/.bash_profile (created with `openssl rand -base64 32` when missing).
   run_check "LUV_TOKEN_CHECKSUM_SECRET is exported in your shell profile" check_checksum_secret fix_checksum_secret required
 
-  # 9. Claude Code — installed, on PATH, up to date, and signed in.
+  # 10. Claude Code — installed, on PATH, up to date, and signed in.
   run_check "Claude Code is installed and logged in" check_claude fix_claude required
 
-  # 10. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv and
+  # 11. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv and
   #     ~/.bash_profile. Entered by hand (paste a JFrog Identity Token).
   run_check "JFrog credentials are exported in your shell profile" check_jfrog_creds fix_jfrog_creds required
 
-  # 11. lumivero-api repository — checked out in the current directory (or we are
-  #     already inside it). Depends on the GitHub CLI (6) for the private clone.
+  # 12. lumivero-api repository — checked out in the current directory (or we are
+  #     already inside it). Depends on the GitHub CLI (7) for the private clone.
   run_check "lumivero-api repository is checked out" check_repo fix_repo required
 
   print_summary
