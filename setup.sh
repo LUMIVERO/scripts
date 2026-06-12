@@ -370,6 +370,84 @@ fix_devcontainer() {
   esac
 }
 
+# Azure CLI — installed and actually runnable (`az version` exits 0). A broken
+# install (e.g. missing Python deps) is reported as such so the fix re-installs.
+check_az() {
+  if ! have_cmd az; then
+    CHECK_DETAIL="not installed"
+    return 1
+  fi
+
+  _ver="$(az version --query '"azure-cli"' -o tsv 2>/dev/null)" || _ver=""
+  if az version >/dev/null 2>&1; then
+    CHECK_DETAIL="${_ver:-installed}"
+    return 0
+  fi
+
+  CHECK_DETAIL="installed but not working; re-install to repair"
+  return 1
+}
+
+# Install the Azure CLI: Microsoft's Debian convenience script on Linux (adds
+# their apt repo and installs the `azure-cli` package), Homebrew on macOS.
+fix_az() {
+  case "$OS_FAMILY" in
+    debian)
+      if have_cmd sudo; then
+        curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash || return 1
+      else
+        curl -sL https://aka.ms/InstallAzureCLIDeb | bash || return 1
+      fi
+      ;;
+    macos)
+      install_pkg azure-cli azure-cli || return 1
+      ;;
+    *)
+      CHECK_DETAIL="no automated installer for this environment"
+      return 1
+      ;;
+  esac
+}
+
+# The Azure Container Registry every developer needs pull/push access to.
+ACR_NAME="uluruscacr"
+
+# Logged in to Azure *and* able to authenticate against the ACR. The probe is
+# non-interactive: `az account show` confirms an active Azure session, then
+# `az acr login` exchanges that session for a registry token (it docker-logs in,
+# so this also relies on Docker — checked earlier). The interactive `az login`
+# lives in the fix, never here, so a check never blocks waiting for a browser.
+check_acr() {
+  if ! have_cmd az; then
+    CHECK_DETAIL="Azure CLI not installed"
+    return 1
+  fi
+
+  if ! az account show >/dev/null 2>&1; then
+    CHECK_DETAIL="not logged in to Azure — run 'az login && az acr login --name ${ACR_NAME}', or file an /ithelp ticket for access to ACR ${ACR_NAME}"
+    return 1
+  fi
+
+  if az acr login --name "$ACR_NAME" >/dev/null 2>&1; then
+    CHECK_DETAIL="logged in; ACR ${ACR_NAME} accessible"
+    return 0
+  fi
+
+  CHECK_DETAIL="logged in to Azure but cannot access ACR ${ACR_NAME} — file an /ithelp ticket to request access"
+  return 1
+}
+
+# Run the interactive login the developer was asked for: `az login` (opens a
+# browser / device-code flow on the terminal) followed by `az acr login` against
+# the registry. The driver re-runs check_acr afterwards to confirm it took.
+fix_acr() {
+  if az login && az acr login --name "$ACR_NAME"; then
+    return 0
+  fi
+  CHECK_DETAIL="login failed — run 'az login && az acr login --name ${ACR_NAME}', or file an /ithelp ticket for access to ACR ${ACR_NAME}"
+  return 1
+}
+
 # ----------------------------------------------------------------------------
 # Check driver.
 # ----------------------------------------------------------------------------
@@ -458,6 +536,13 @@ main() {
 
   # 3. devcontainer CLI — installed, on PATH, and executable.
   run_check "devcontainer CLI is installed and on PATH" check_devcontainer fix_devcontainer required
+
+  # 4. Azure CLI — installed and runnable.
+  run_check "Azure CLI is installed and working" check_az fix_az required
+
+  # 5. Azure + ACR login — signed in and able to reach the uluruscacr registry.
+  #    Depends on the Azure CLI (4) and Docker (2), so it comes last.
+  run_check "Logged in to Azure and ACR uluruscacr accessible" check_acr fix_acr required
 
   print_summary
 
