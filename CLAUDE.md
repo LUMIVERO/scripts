@@ -7,10 +7,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A collection of setup shell scripts published via **GitHub Pages** and consumed remotely by piping into a shell:
 
 ```sh
-curl -fsSL https://lumivero.github.io/scripts/setup.sh | sh
+curl -fsSL https://lumivero.github.io/scripts/lumivero-api_setup.sh | sh
 ```
 
 `lumivero.github.io/scripts/` maps directly to the root of this repo (`LUMIVERO/scripts`). There is **no build step** — whatever is committed at the repo root is what gets served and executed by end users. Editing a script and pushing to `main` is the deploy.
+
+### One script per app
+
+This repository hosts a setup script **per app**, not a single shared script. Scripts follow the naming convention:
+
+```
+<app>_setup.sh
+```
+
+and are served at `https://lumivero.github.io/scripts/<app>_setup.sh`. The first such script is `lumivero-api_setup.sh` (the Lumivero API environment checklist). To onboard another app, add a new `<app>_setup.sh` at the repo root and list it in [`README.md`](README.md); every script must independently satisfy the constraints below, since each is fetched and run on its own.
 
 ## Critical constraints
 
@@ -23,12 +33,12 @@ These follow from the `curl … | sh` delivery model and override convenience:
 
 ## Working with the scripts
 
-- **Run / test:** `sh setup.sh` (execute it directly to see detection output). There is no test framework — verify by running.
-- **Lint:** `shellcheck setup.sh`. The codebase already uses inline directives (`# shellcheck disable=SC1091` where `/etc/os-release` is sourced), so shellcheck is the expected linter.
+- **Run / test:** `sh lumivero-api_setup.sh` (execute it directly to see detection output). There is no test framework — verify by running.
+- **Lint:** `shellcheck lumivero-api_setup.sh`. The codebase already uses inline directives (`# shellcheck disable=SC1091` where `/etc/os-release` is sourced), so shellcheck is the expected linter.
 
-## `setup.sh` architecture
+## `lumivero-api_setup.sh` architecture
 
-`setup.sh` is a **requirements checklist**: it runs an ordered list of checks (required tools + environment settings), prints a coloured pass/fail/warn line per item with emoji status icons, and — where a fix is known — offers to install or repair the missing piece. The final exit status is non-zero if any **required** check is unsatisfied.
+`lumivero-api_setup.sh` is a **requirements checklist**: it runs an ordered list of checks (required tools + environment settings), prints a coloured pass/fail/warn line per item with emoji status icons, and — where a fix is known — offers to install or repair the missing piece. The final exit status is non-zero if any **required** check is unsatisfied.
 
 ### Adding a check
 

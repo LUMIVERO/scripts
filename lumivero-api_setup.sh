@@ -1,14 +1,14 @@
 #!/usr/bin/env sh
 
 #
-# setup.sh — Lumivero environment checklist.
+# lumivero-api_setup.sh — Lumivero API environment checklist.
 #
 # Walks a list of requirements (tools + environment settings), reports the
 # status of each with a clear pass/fail/warn marker and, where a fix is known,
 # offers to install or repair it.
 #
 # Delivery model: this script is served from GitHub Pages and run with
-#   curl -fsSL https://lumivero.github.io/scripts/setup.sh | sh
+#   curl -fsSL https://lumivero.github.io/scripts/lumivero-api_setup.sh | sh
 # so it must stay POSIX-sh clean, self-contained, and safe under `set -eu`.
 #
 

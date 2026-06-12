@@ -1,17 +1,18 @@
 ---
-description: How to add checks and fixes to setup.sh
-globs: setup.sh
+description: How to add checks and fixes to a <app>_setup.sh script
+globs: "*_setup.sh"
 alwaysApply: false
 ---
 
-# Rule: Adding checks and fixes to `setup.sh`
+# Rule: Adding checks and fixes to a `<app>_setup.sh` script
 
-How to add a new requirement to `setup.sh`. Follow this exactly — the patterns
-exist for a reason (see "Constraints" and "Gotchas").
+How to add a new requirement to an app's setup script (e.g.
+`lumivero-api_setup.sh`). Follow this exactly — the patterns exist for a reason
+(see "Constraints" and "Gotchas").
 
 ## Mental model
 
-`setup.sh` is a **requirements checklist**. It runs an ordered list of checks,
+A `<app>_setup.sh` is a **requirements checklist**. It runs an ordered list of checks,
 prints one coloured pass/fail/warn line per item, and — where a fix is known —
 offers to install/repair it. The run exits non-zero iff any **required** check
 is unsatisfied. `run_check` always returns `0`, so one failure never aborts the
@@ -52,8 +53,9 @@ The script is served from GitHub Pages and run as `curl -fsSL … | sh`:
    Severity `required` (default) → a miss is ❌ and exits non-zero. `optional`
    → a miss is ⚠️ and does not fail the run. Use `optional` for nice-to-haves.
 
-4. **Verify**: `shellcheck setup.sh && sh setup.sh`. Both must be clean.
-   (Project memory: always do this after editing `setup.sh`.)
+4. **Verify**: `shellcheck <app>_setup.sh && sh <app>_setup.sh` (e.g.
+   `shellcheck lumivero-api_setup.sh && sh lumivero-api_setup.sh`). Both must be
+   clean. (Project memory: always do this after editing a setup script.)
 
 ## Building blocks (already in the script — reuse, don't reinvent)
 
