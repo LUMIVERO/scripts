@@ -52,11 +52,8 @@ The script is served from GitHub Pages and run as `curl -fsSL … | sh`:
 
    Severity `required` (default) → a miss is ❌ and exits non-zero. `optional`
    → a miss is ⚠️ and does not fail the run. Use `optional` for nice-to-haves.
-
-   If the script has the side-scroller animation (e.g. `lumivero-api_setup.sh`),
-   there is nothing to bump: each check plays one self-contained scene (its beast
-   and fruit cycle from the `BEASTS`/`FRUITS` lists by check number, wrapping when
-   there are more checks than entries), so the animation scales automatically.
+   The driver prints one coloured pass/fail/warn line per check, so a new check
+   needs no extra wiring beyond its `run_check` line.
 
 4. **Verify**: `shellcheck <app>_setup.sh && sh <app>_setup.sh` (e.g.
    `shellcheck lumivero-api_setup.sh && sh lumivero-api_setup.sh`). Both must be
@@ -80,6 +77,13 @@ The script is served from GitHub Pages and run as `curl -fsSL … | sh`:
   before each check and each fix re-check; just assign it.
 - `OS_FAMILY` — `macos` | `debian`, set by `check_os` (always check #1). Branch
   on it when behaviour differs per OS (see `check_docker`/`fix_docker`).
+- `RESTART_REQUIRED` — set this (to an explanatory message) from a fix whose
+  effect only reaches a *fresh login session*, so the immediate re-check can't
+  pass no matter what — e.g. `fix_docker`'s new `docker` group membership. The
+  driver counts the check as fixed, prints the message via
+  `finish_restart_required`, and exits 0; the remaining checks are skipped
+  (they'd fail in this session anyway). Use it only when a restart is genuinely
+  unavoidable — a normal PATH/env fix should make the current process pass.
 
 ## Worked references in the file
 

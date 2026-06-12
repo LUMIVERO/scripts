@@ -61,78 +61,13 @@ ICON_DONE="🚀"
 OS_FAMILY=""        # macos | debian — set by check_os, consumed by install_pkg
 CHECK_DETAIL=""     # short context a check may surface beside its result
 PROFILES_CHANGED="" # shell-startup files actually modified this run (space-separated)
+RESTART_REQUIRED="" # set by a fix whose effect only reaches a fresh login session
 
 CHECK_TOTAL=0
 PASS_COUNT=0
 FIXED_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
-CHECK_INDEX=0       # 1-based position of the current check (picks each beast)
-
-# ----------------------------------------------------------------------------
-# Side-scroller animation state.
-#
-# A little side-scroller: the developer (🧑‍💻) holds a fixed spot on the left and
-# flies up and down, while a landscape of trees and greenery scrolls past along
-# the ground — so the stationary developer appears to be flying rightward. Each
-# check arrives from the right as a beast; the developer lines up and blasts it,
-# the beast turns into a fruit that scrolls back and is digested as the developer
-# flies over it. A failing check sends the developer crashing into the ground.
-# Active only on an interactive terminal (GAME_ON); otherwise the script falls
-# back to plain line-by-line results, so `curl … | sh` in CI is unaffected.
-# ----------------------------------------------------------------------------
-
-# The game needs cursor control and redraws, so it runs only when stdout is an
-# interactive terminal. SETUP_NO_GAME=1 opts out (e.g. for a quieter run).
-GAME_ON=0
-if [ -t 1 ] && [ "${SETUP_NO_GAME:-0}" != "1" ]; then
-  GAME_ON=1
-fi
-
-# Playfield geometry, in cells (each cell is one 2-wide glyph). From the top:
-# flight rows 0..TREE_ROW-1 are open sky where the developer, beasts and fruit
-# fly; then a scrolling tree line, a green grass band, and a brown earth band at
-# the bottom. The developer holds a fixed column (DEV_COL) and only changes row
-# — it "flies" vertically — while beasts and fruit enter from the right. Each
-# check plays one self-contained scene, so the animation needs no check count to
-# pace it (it scales automatically).
-FIELD_W=12             # playfield width in cells
-FIELD_H=8              # playfield height in cells (flight rows + 3 ground bands)
-TREE_ROW=5             # scrolling tree line (trees with sky gaps); also the row a
-                       # crashing developer hits, and the count of flight rows
-GRASS_ROW=6            # solid green grass band
-EARTH_ROW=7            # solid brown earth band (bottom row)
-DEV_COL=1              # the developer's fixed column
-START_ROW=2            # the developer's resting flight height
-DEV_ROW=2              # the developer's current row (mutated as it flies)
-RESULTS=""             # accumulated result lines, redrawn beneath the field
-GAME_ELINE="${ESC}[K"  # erase-to-end-of-line, appended per row for flicker-free redraws
-
-# Per-scene actors, chosen by check number in run_check_game.
-CUR_BEAST=""           # the beast glyph for the current check
-CUR_FRUIT=""           # the fruit it turns into when blasted
-BEAST_ROW=0            # the sky row the beast occupies (varies per check)
-
-# A different dangerous beast — and the fruit it becomes — per check, cycled by
-# index (wrapping if there are ever more checks than entries).
-BEASTS="🐉 👹 👾 🦂 🐍 🦖 🐊 🐺 🦅 🦈 👻"
-FRUITS="🍎 🍊 🍇 🍓 🍒 🍑 🍐 🍍 🍌 🥝 🍉"
-
-# Scrolling tree line. SCROLL advances one cell per frame, shifting the tree row
-# left so the stationary developer reads as flying rightward; beasts and fruit
-# move left at this same one-cell-per-frame speed. GROUND_SCENERY is the
-# repeating run of trees and sky gaps (split into SCEN_0… by scenery_init); a
-# prime-ish length avoids the pattern lining up with the field width.
-SCROLL=0
-GROUND_SCENERY="🌲 🟦 🟦 🌳 🟦 🌲 🟦 🟦 🌳 🟦 🟦 🌲 🟦 🌳 🟦 🟦 🌲"
-GROUND_LEN=0           # number of tree-line cells (set by scenery_init)
-
-G_SKY="🟦"      # open sky (also the gaps between trees on the tree line)
-G_GRASS="🟩"    # solid green grass band
-G_EARTH="🟫"    # solid brown earth band (bottom row)
-G_DEV="🧑‍💻"     # the developer (holds a fixed spot, flies up and down)
-G_SHOT="✨"      # the blast travelling toward a beast
-G_CRASH="💥"    # the developer crashing into the ground on a failed check
 
 # ----------------------------------------------------------------------------
 # Output helpers.
@@ -242,234 +177,6 @@ confirm() {
 }
 
 # ----------------------------------------------------------------------------
-# Side-scroller rendering.
-#
-# Each frame is a full redraw: the playfield on top, the accumulated pass/fail
-# lines (RESULTS) below. Used only when GAME_ON=1; run_check otherwise prints
-# results live, line by line.
-# ----------------------------------------------------------------------------
-
-game_sleep() {
-  sleep 0.06 2>/dev/null || true
-}
-
-# Split GROUND_SCENERY into positional cells SCEN_0 … SCEN_{GROUND_LEN-1} so the
-# ground row can be indexed by arithmetic (no per-cell subshell) as it scrolls.
-scenery_init() {
-  GROUND_LEN=0
-  # shellcheck disable=SC2086  # deliberate word-splitting over the scenery list
-  for _s in $GROUND_SCENERY; do
-    eval "SCEN_${GROUND_LEN}=\$_s"
-    GROUND_LEN=$((GROUND_LEN + 1))
-  done
-}
-
-# The Nth (1-based) whitespace-separated token of a list, wrapping around when
-# the index exceeds the count. Used to pick a beast / fruit per check.
-nth_token() {
-  _idx="$1"
-  _list="$2"
-  _count=0
-  # shellcheck disable=SC2086  # deliberate word-splitting over the token list
-  for _t in $_list; do _count=$((_count + 1)); done
-  [ "$_count" -gt 0 ] || return 0
-  _want=$(( (_idx - 1) % _count + 1 ))
-  _i=0
-  # shellcheck disable=SC2086
-  for _t in $_list; do
-    _i=$((_i + 1))
-    if [ "$_i" -eq "$_want" ]; then
-      printf '%s' "$_t"
-      return 0
-    fi
-  done
-}
-
-banner_game() {
-  printf '%s%s  Lumivero Setup — flight of the developer%s   %sfly %s up & down · blast beasts · eat fruit%s%s\n%s\n' \
-    "$BOLD" "$ICON_DONE" "$RESET" "$DIM" "$G_DEV" "$RESET" "$GAME_ELINE" "$GAME_ELINE"
-}
-
-# Draw one frame flicker-free: open a synchronized update (ignored by terminals
-# that don't support it), home the cursor, and overwrite the previous frame in
-# place — no clear *before* drawing, so the screen never blanks. Each row erases
-# its own tail (GAME_ELINE); a single clear-below at the end trims any leftover
-# lines underneath.
-#
-#   render_field <dev_row> <actor_kind> <actor_row> <actor_col> <shot_col> <crashed>
-#
-# actor_kind is beast | fruit | gone | none; shot_col is the blast column (-1
-# when no blast is in flight); crashed=1 draws the developer wrecked (💥) on the
-# tree line at its column. The bottom three rows are the scrolling tree line (sky
-# showing through the gaps), a green grass band and a brown earth band; in the
-# flight rows above, cell priority is developer, then actor, then blast, else sky.
-render_field() {
-  _drow="$1"
-  _akind="$2"
-  _arow="$3"
-  _acol="$4"
-  _shot="$5"
-  _crash="$6"
-
-  printf '%s[?2026h%s[H' "$ESC" "$ESC"
-  banner_game
-
-  _r=0
-  while [ "$_r" -lt "$FIELD_H" ]; do
-    _line="   "
-    _c=0
-    while [ "$_c" -lt "$FIELD_W" ]; do
-      if [ "$_r" -eq "$EARTH_ROW" ]; then
-        _cell="$G_EARTH"
-      elif [ "$_r" -eq "$GRASS_ROW" ]; then
-        _cell="$G_GRASS"
-      elif [ "$_r" -eq "$TREE_ROW" ]; then
-        if [ "$_crash" = "1" ] && [ "$_c" -eq "$DEV_COL" ]; then
-          _cell="$G_CRASH"
-        elif [ "$GROUND_LEN" -gt 0 ]; then
-          _gi=$(( (_c + SCROLL) % GROUND_LEN ))
-          eval "_cell=\$SCEN_${_gi}"
-        else
-          _cell="$G_SKY"
-        fi
-      elif [ "$_crash" != "1" ] && [ "$_c" -eq "$DEV_COL" ] && [ "$_r" -eq "$_drow" ]; then
-        _cell="$G_DEV"
-      elif [ "$_akind" != "none" ] && [ "$_akind" != "gone" ] && [ "$_c" -eq "$_acol" ] && [ "$_r" -eq "$_arow" ]; then
-        if [ "$_akind" = "beast" ]; then
-          _cell="$CUR_BEAST"
-        else
-          _cell="$CUR_FRUIT"
-        fi
-      elif [ "$_shot" -ge 0 ] && [ "$_c" -eq "$_shot" ] && [ "$_r" -eq "$_arow" ]; then
-        _cell="$G_SHOT"
-      else
-        _cell="$G_SKY"
-      fi
-      _line="${_line}${_cell}"
-      _c=$((_c + 1))
-    done
-    printf '%s%s\n' "$_line" "$GAME_ELINE"
-    _r=$((_r + 1))
-  done
-
-  printf '%s\n%s' "$GAME_ELINE" "$RESULTS"
-  printf '%s[J%s[?2026l' "$ESC" "$ESC"
-
-  SCROLL=$((SCROLL + 1))   # advance the landscape one cell for the next frame
-}
-
-# Animate one check's scene. <state> is ok|fixed|warn|fail. The beast flies in
-# from the right at world speed (one cell per frame, the same as the scrolling
-# trees). On a non-failing state the developer lines up its row and blasts the
-# beast into a fruit that scrolls back and is digested as it flies over; on a
-# failure the beast reaches the developer, who plummets and crashes into the
-# ground. DEV_ROW persists between scenes, so the climb or dive to meet each
-# beast is the up-and-down "flying" motion.
-play_scene() {
-  _state="$1"
-  _bcol=$((FIELD_W - 1))        # the beast enters at the right edge
-
-  # Fly the developer one row toward the beast (helper kept inline for clarity).
-  if [ "$_state" = "fail" ]; then
-    # The beast flies all the way in and collides with the developer …
-    while [ "$_bcol" -gt $((DEV_COL + 1)) ]; do
-      if [ "$DEV_ROW" -lt "$BEAST_ROW" ]; then
-        DEV_ROW=$((DEV_ROW + 1))
-      elif [ "$DEV_ROW" -gt "$BEAST_ROW" ]; then
-        DEV_ROW=$((DEV_ROW - 1))
-      fi
-      render_field "$DEV_ROW" beast "$BEAST_ROW" "$_bcol" -1 0
-      game_sleep
-      _bcol=$((_bcol - 1))
-    done
-    # … and the developer plummets and crashes into the ground (the tree line).
-    _fall="$DEV_ROW"
-    while [ "$_fall" -lt $((TREE_ROW - 1)) ]; do
-      _fall=$((_fall + 1))
-      render_field "$_fall" beast "$BEAST_ROW" "$_bcol" -1 0
-      game_sleep
-    done
-    render_field "$TREE_ROW" beast "$BEAST_ROW" "$_bcol" -1 1
-    game_sleep
-    DEV_ROW="$START_ROW"   # respawn at resting height for the next check
-    return 0
-  fi
-
-  # The developer flies up or down to line up its row; once aligned it fires a
-  # blast that travels right to meet the left-moving beast.
-  _shot=-1
-  while :; do
-    if [ "$DEV_ROW" -lt "$BEAST_ROW" ]; then
-      DEV_ROW=$((DEV_ROW + 1))
-    elif [ "$DEV_ROW" -gt "$BEAST_ROW" ]; then
-      DEV_ROW=$((DEV_ROW - 1))
-    elif [ "$_shot" -lt 0 ]; then
-      _shot=$((DEV_COL + 1))                       # aligned — launch the blast
-    fi
-
-    [ "$_shot" -ge 0 ] && [ "$_shot" -ge "$_bcol" ] && break   # blast meets beast
-    [ "$_bcol" -le $((DEV_COL + 1)) ] && break                 # safety stop
-
-    render_field "$DEV_ROW" beast "$BEAST_ROW" "$_bcol" "$_shot" 0
-    game_sleep
-    _bcol=$((_bcol - 1))
-    [ "$_shot" -ge 0 ] && _shot=$((_shot + 1))
-  done
-
-  # The beast turns into a fruit where it was hit …
-  render_field "$DEV_ROW" fruit "$BEAST_ROW" "$_bcol" -1 0
-  game_sleep
-
-  # … and the fruit scrolls left at world speed until the developer flies over
-  # and digests it.
-  _fcol="$_bcol"
-  while [ "$_fcol" -gt "$DEV_COL" ]; do
-    _fcol=$((_fcol - 1))
-    render_field "$DEV_ROW" fruit "$BEAST_ROW" "$_fcol" -1 0
-    game_sleep
-  done
-  render_field "$DEV_ROW" gone "$BEAST_ROW" "$DEV_COL" -1 0
-  game_sleep
-}
-
-# Format one result line (no trailing newline) for the RESULTS buffer. Mirrors
-# print_result but returns the string instead of printing it live.
-format_result() {
-  _fstate="$1"
-  _flabel="$2"
-  _fdetail="${3:-}"
-
-  case "$_fstate" in
-    ok)    _ficon="$ICON_PASS"; _fcolor="$GREEN" ;;
-    fixed) _ficon="$ICON_FIX";  _fcolor="$GREEN" ;;
-    warn)  _ficon="$ICON_WARN"; _fcolor="$YELLOW" ;;
-    fail)  _ficon="$ICON_FAIL"; _fcolor="$RED" ;;
-    *)     _ficon="$ICON_INFO"; _fcolor="$BLUE" ;;
-  esac
-
-  if [ -n "$_fdetail" ]; then
-    printf '   %s  %s%s%s %s(%s)%s' "$_ficon" "$_fcolor" "$_flabel" "$RESET" "$DIM" "$_fdetail" "$RESET"
-  else
-    printf '   %s  %s%s%s' "$_ficon" "$_fcolor" "$_flabel" "$RESET"
-  fi
-}
-
-# Format the cheerful "the developer crashed" block for a failed check (no
-# trailing newline). The detail already carries the fix hint.
-format_crash() {
-  _dlabel="$1"
-  _ddetail="${2:-}"
-
-  printf '   %s  %s%sThe beast won — you crashed into the ground!%s %s%s%s\n' \
-    "$G_CRASH" "$BOLD" "$RED" "$RESET" "$RED" "$_dlabel" "$RESET"
-  if [ -n "$_ddetail" ]; then
-    printf '       %s %sRespawn quest:%s %s%s%s\n' "$ICON_FIX" "$BOLD" "$RESET" "$DIM" "$_ddetail" "$RESET"
-  fi
-  printf '       %sShake it off and take flight again — you'\''ve got this! 💪%s' \
-    "$DIM" "$RESET"
-}
-
-# ----------------------------------------------------------------------------
 # Environment probes.
 # ----------------------------------------------------------------------------
 
@@ -483,9 +190,9 @@ is_wsl() {
 # A POSIX `sh` exists on Windows only via a Cygwin/MinGW/MSYS shell (Git Bash et
 # al.), where `uname -s` reports CYGWIN*/MINGW*/MSYS* — whereas Ubuntu under WSL
 # reports Linux (and is recognised by is_wsl). So when we see one of those shells
-# we are on Windows but not in WSL: stop immediately, before the game or any
-# check/fix runs (we must never animate or try to install Docker here), and
-# explain how to get Ubuntu onto WSL. Exits the script non-zero on a match.
+# we are on Windows but not in WSL: stop immediately, before any check/fix runs
+# (we must never try to install Docker here), and explain how to get Ubuntu onto
+# WSL. Exits the script non-zero on a match.
 bail_if_windows_without_wsl() {
   case "$(uname -s)" in
     CYGWIN* | MINGW* | MSYS*) ;;   # a Windows shell; WSL would report Linux
@@ -713,6 +420,13 @@ fix_docker() {
   else
     usermod -aG docker "$_user" || return 1
   fi
+
+  # The install succeeded, but the freshly added 'docker' group membership only
+  # takes effect in a new login session — the daemon isn't usable in this one,
+  # so re-checking now would fail no matter what. Raise RESTART_REQUIRED instead:
+  # the driver stops the run here and asks the developer to restart and re-run.
+  CHECK_DETAIL="installed — restart your session to use it"
+  RESTART_REQUIRED="Docker is installed, but its 'docker' group only takes effect in a new login session. Log out and back in (or close and reopen your terminal), then re-run this script."
 }
 
 # Default location the official devcontainers/cli install script writes to: a
@@ -1225,15 +939,8 @@ run_check() {
   _severity="${4:-required}"
 
   CHECK_TOTAL=$((CHECK_TOTAL + 1))
-  CHECK_INDEX=$((CHECK_INDEX + 1))
   CHECK_DETAIL=""
 
-  if [ "$GAME_ON" = "1" ]; then
-    run_check_game "$_label" "$_check" "$_fix" "$_severity"
-    return 0
-  fi
-
-  # ---- plain line-by-line presentation (non-interactive / opted out) --------
   print_pending "$_label"
 
   if "$_check"; then
@@ -1248,6 +955,7 @@ run_check() {
   if [ -n "$_fix" ] && confirm "Attempt to fix \"$_label\" now?"; then
     print_fixing "$_label"
     if "$_fix"; then
+      [ -n "$RESTART_REQUIRED" ] && finish_restart_required "$_label"
       CHECK_DETAIL=""
       if "$_check"; then
         print_result fixed "$_label" "$CHECK_DETAIL"
@@ -1269,64 +977,26 @@ run_check() {
   return 0
 }
 
-# Game variant of run_check: resolves the check (running its fix if confirmed),
-# appends a result line — or a crash block on an unresolved failure — to the
-# RESULTS buffer, then animates this check's scene. The fix runs before the
-# scene, so a successful fix plays a clean blast-and-eat rather than a crash.
-# Counters are kept identical to the plain path so print_summary agrees.
-run_check_game() {
+# Stop the run early because a fix installed something whose effect only reaches
+# a fresh login session (Docker's 'docker' group is the case in point): the
+# remaining checks can't pass in this session, so there's no point continuing.
+# The install itself succeeded, so this records the check as fixed, shows it,
+# prints the restart instruction RESTART_REQUIRED carries, and exits 0 — nothing
+# failed; the developer just restarts and re-runs.
+finish_restart_required() {
   _label="$1"
-  _check="$2"
-  _fix="${3:-}"
-  _severity="${4:-required}"
+  _detail="${CHECK_DETAIL:-installed — restart your session}"
+  FIXED_COUNT=$((FIXED_COUNT + 1))
 
-  # This check's beast and the fruit it becomes (cycled by check number); the
-  # row it occupies varies so the developer has to fly up and down to meet it.
-  CUR_BEAST="$(nth_token "$CHECK_INDEX" "$BEASTS")"
-  CUR_FRUIT="$(nth_token "$CHECK_INDEX" "$FRUITS")"
-  BEAST_ROW=$(( (CHECK_INDEX * 3 + 1) % TREE_ROW ))   # flight rows are 0..TREE_ROW-1
+  print_result fixed "$_label" "$_detail"
 
-  _state=""
-  if "$_check"; then
-    _state="ok"
-  else
-    _detail="$CHECK_DETAIL"
-    if [ -n "$_fix" ] && confirm "Attempt to fix \"$_label\" now?"; then
-      print_fixing "$_label"
-      if "$_fix"; then
-        CHECK_DETAIL=""
-        "$_check" && _state="fixed"
-      fi
-      [ -z "$_state" ] && _detail="${CHECK_DETAIL:-$_detail}"
-    fi
-    if [ -z "$_state" ]; then
-      if [ "$_severity" = "optional" ]; then
-        _state="warn"
-      else
-        _state="fail"
-      fi
-    fi
-  fi
+  print_reload_notice   # name any profile files changed (no-op when none were)
 
-  case "$_state" in
-    ok)
-      _rline="$(format_result ok "$_label" "$CHECK_DETAIL")"
-      PASS_COUNT=$((PASS_COUNT + 1)) ;;
-    fixed)
-      _rline="$(format_result fixed "$_label" "$CHECK_DETAIL")"
-      FIXED_COUNT=$((FIXED_COUNT + 1)) ;;
-    warn)
-      _rline="$(format_result warn "$_label" "$_detail")"
-      WARN_COUNT=$((WARN_COUNT + 1)) ;;
-    *)
-      _rline="$(format_crash "$_label" "$_detail")"
-      FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
-  esac
+  printf '\n%s%s  Restart your session, then re-run this script%s\n' \
+    "$BOLD" "$ICON_INFO" "$RESET"
+  printf '%s%s%s\n\n' "$DIM" "$RESTART_REQUIRED" "$RESET"
 
-  RESULTS="${RESULTS}${_rline}
-"
-
-  play_scene "$_state"
+  exit 0
 }
 
 # ----------------------------------------------------------------------------
@@ -1334,20 +1004,11 @@ run_check_game() {
 # ----------------------------------------------------------------------------
 
 main() {
-  # Windows without WSL has no supported path: bail with guidance before the
-  # game or any check runs, rather than animating and trying to install Docker.
+  # Windows without WSL has no supported path: bail with guidance before any
+  # check runs, rather than trying to install Docker.
   bail_if_windows_without_wsl
 
-  if [ "$GAME_ON" = "1" ]; then
-    RESULTS=""
-    SCROLL=0
-    DEV_ROW="$START_ROW"
-    scenery_init
-    render_field "$DEV_ROW" none 0 0 -1 0
-    game_sleep
-  else
-    banner
-  fi
+  banner
 
   # 1. Operating system — the foundation every other check builds on.
   run_check "Supported operating system" check_os "" required
@@ -1408,22 +1069,12 @@ main() {
   print_reload_notice
 
   if [ "$FAIL_COUNT" -gt 0 ]; then
-    if [ "$GAME_ON" = "1" ]; then
-      printf '\n%s%s %d crash(es) — clear the quest(s) above and take flight again.%s\n\n' \
-        "$RED" "$G_CRASH" "$FAIL_COUNT" "$RESET"
-    else
-      printf '\n%s%s Setup incomplete — %d required check(s) need attention.%s\n\n' \
-        "$RED" "$ICON_FAIL" "$FAIL_COUNT" "$RESET"
-    fi
+    printf '\n%s%s Setup incomplete — %d required check(s) need attention.%s\n\n' \
+      "$RED" "$ICON_FAIL" "$FAIL_COUNT" "$RESET"
     exit 1
   fi
 
-  if [ "$GAME_ON" = "1" ]; then
-    printf '\n%s%s Every beast cleared — environment ready! 🏆🎉%s\n\n' \
-      "$GREEN" "$BOLD" "$RESET"
-  else
-    printf '\n%s%s Environment ready.%s\n\n' "$GREEN" "$ICON_DONE" "$RESET"
-  fi
+  printf '\n%s%s Environment ready.%s\n\n' "$GREEN" "$ICON_DONE" "$RESET"
 }
 
 main "$@"
