@@ -32,6 +32,8 @@ These follow from the `curl … | sh` delivery model and override convenience:
 
 ### Adding a check
 
+> Full recipe, building blocks, and gotchas: [`.claude/rules/setup-sh-checks.md`](.claude/rules/setup-sh-checks.md). Read it before adding a check or fix.
+
 Each item is a single `run_check` line in `main()`:
 
 ```sh

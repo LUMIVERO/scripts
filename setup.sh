@@ -173,6 +173,18 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+# Append a line to a file unless it is already present, creating the file if
+# missing. Idempotent, so it is safe to call on every run (e.g. to put a tool's
+# bin directory on PATH in a shell rc file).
+ensure_line_in_file() {
+  _file="$1"
+  _line="$2"
+  if grep -qF "$_line" "$_file" 2>/dev/null; then
+    return 0
+  fi
+  printf '%s\n' "$_line" >>"$_file"
+}
+
 # Install a package by Homebrew formula (macOS) or apt package (Debian/Ubuntu).
 # Usage: install_pkg <brew-formula> <apt-package>
 # Sets CHECK_DETAIL and returns non-zero when it cannot install.
@@ -308,6 +320,56 @@ fix_docker() {
   fi
 }
 
+# Default location the official devcontainers/cli install script writes to: a
+# self-contained build (bundling its own Node) under ~/.devcontainers/bin. The
+# binary can therefore exist there before that directory is on PATH.
+DEVCONTAINER_BIN_DIR="${HOME}/.devcontainers/bin"
+
+# devcontainer CLI — installed and runnable from PATH. We treat "on PATH and
+# executes" as the bar; a binary that exists in the default install dir but is
+# not yet on PATH is reported separately so the fix knows to repair PATH only.
+check_devcontainer() {
+  if have_cmd devcontainer; then
+    _ver="$(devcontainer --version 2>/dev/null)" || _ver=""
+    CHECK_DETAIL="${_ver:-installed}"
+    return 0
+  fi
+
+  if [ -x "${DEVCONTAINER_BIN_DIR}/devcontainer" ]; then
+    CHECK_DETAIL="installed but ${DEVCONTAINER_BIN_DIR} is not on PATH"
+    return 1
+  fi
+
+  CHECK_DETAIL="not installed"
+  return 1
+}
+
+# Install the devcontainer CLI via the official script when missing, then put
+# its bin directory on PATH: persisted for future bash and zsh sessions and
+# exported into the current process so the immediate re-check sees the binary.
+fix_devcontainer() {
+  if [ ! -x "${DEVCONTAINER_BIN_DIR}/devcontainer" ] && ! have_cmd devcontainer; then
+    if ! curl -fsSL https://raw.githubusercontent.com/devcontainers/cli/main/scripts/install.sh | sh; then
+      CHECK_DETAIL="install script failed"
+      return 1
+    fi
+  fi
+
+  # Literal $HOME/$PATH so the interactive shell expands them at startup, not now.
+  # shellcheck disable=SC2016
+  _line='export PATH="$HOME/.devcontainers/bin:$PATH"'
+  ensure_line_in_file "${HOME}/.bashrc" "$_line"
+  ensure_line_in_file "${HOME}/.zshrc" "$_line"
+
+  case ":${PATH}:" in
+    *":${DEVCONTAINER_BIN_DIR}:"*) ;;
+    *)
+      PATH="${DEVCONTAINER_BIN_DIR}:${PATH}"
+      export PATH
+      ;;
+  esac
+}
+
 # ----------------------------------------------------------------------------
 # Check driver.
 # ----------------------------------------------------------------------------
@@ -393,6 +455,9 @@ main() {
 
   # 2. Docker — installed and its daemon reachable.
   run_check "Docker is installed and available" check_docker fix_docker required
+
+  # 3. devcontainer CLI — installed, on PATH, and executable.
+  run_check "devcontainer CLI is installed and on PATH" check_devcontainer fix_devcontainer required
 
   print_summary
 
