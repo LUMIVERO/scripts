@@ -28,17 +28,46 @@ These follow from the `curl … | sh` delivery model and override convenience:
 
 ## `setup.sh` architecture
 
-`setup.sh` is currently an **environment-detection gate**: it identifies the OS/distro and either confirms a supported environment or fails. Supported matrix:
+`setup.sh` is a **requirements checklist**: it runs an ordered list of checks (required tools + environment settings), prints a coloured pass/fail/warn line per item with emoji status icons, and — where a fix is known — offers to install or repair the missing piece. The final exit status is non-zero if any **required** check is unsatisfied.
 
-- **macOS** (`uname -s` = `Darwin`)
-- **Debian Linux** and **Ubuntu Linux** (read from `/etc/os-release` `ID`)
-- **Ubuntu under Windows WSLg** — the only supported Windows path
+### Adding a check
+
+Each item is a single `run_check` line in `main()`:
+
+```sh
+run_check "<label>" <check_fn> [<fix_fn>] [required|optional]
+```
+
+- `check_fn` returns `0` when satisfied and may set `CHECK_DETAIL` to a short string shown beside the result (e.g. the detected version or the reason it failed).
+- `fix_fn` is optional. When the check fails, the user is asked (via `confirm`) whether to run it; afterwards the check is re-run to confirm. Returns `0` on success.
+- Severity `required` (default) counts a miss as a failure (❌, exits non-zero); `optional` counts it as a warning (⚠️) and does not fail the run.
+
+`run_check` itself always returns `0`, so one failing check never aborts the run under `set -e` — every item is evaluated and the summary/exit code is derived from `FAIL_COUNT` in `main()`.
+
+### Building blocks for checks
+
+- `have_cmd <name>` — true if a command is on `PATH`.
+- `install_pkg <brew-formula> <apt-package>` — installs via Homebrew on macOS or `apt-get` on Debian/Ubuntu, keyed off `OS_FAMILY` (set by `check_os`). Sets `CHECK_DETAIL` and returns non-zero when it can't install.
+
+A worked template (`check_git`/`fix_git`) is in the comment block in `main()`.
+
+### Check #1: operating system (`check_os`)
+
+The OS check is always first because it sets `OS_FAMILY` (`macos` | `debian`), which the package-installer relies on. It has no fix (you can't install an OS). Supported matrix:
+
+- **macOS** (`uname -s` = `Darwin`) → `OS_FAMILY=macos`
+- **Debian Linux** and **Ubuntu Linux** (`/etc/os-release` `ID`) → `OS_FAMILY=debian`
+- **Ubuntu under Windows WSL** — the only supported Windows path → `OS_FAMILY=debian`
 
 Explicitly rejected: Cygwin/MinGW/MSYS bash environments, and any other distro/OS.
 
-WSL detection lives in helper functions: `is_wsl()` (checks `WSL_INTEROP`/`WSL_DISTRO_NAME` env vars and `/proc/version`) and `is_wslg()` (checks WSLg display markers). Note `is_wslg()` is defined but not yet wired into the main `case` block.
+WSL detection lives in the `is_wsl()` helper (checks `WSL_INTEROP`/`WSL_DISTRO_NAME` env vars and `/proc/version`). Plain WSL is sufficient — there is no separate WSLg (graphical) requirement.
 
-When extending a script beyond detection (installing tools, configuring the machine), keep the detection-then-act structure: validate the environment up front, then perform actions only for confirmed-supported environments.
+### Presentation & interaction notes
+
+- **Colour degrades gracefully:** ANSI colour is emitted only when stdout is a TTY, `NO_COLOR` is unset, and `TERM` isn't `dumb`. Emoji icons are always printed (they're plain UTF-8). Transient "⏳ …" progress lines are shown only on a TTY and overwritten by the result.
+- **Prompts read from `/dev/tty`,** not stdin, so they work under `curl … | sh` (where the script itself occupies stdin). `confirm` probes that `/dev/tty` can actually be opened and declines quietly otherwise (headless/CI).
+- **Unattended runs:** set `SETUP_ASSUME_YES=1` to auto-accept every fix prompt.
 
 ## Conventions
 
