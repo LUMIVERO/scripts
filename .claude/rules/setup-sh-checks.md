@@ -53,6 +53,11 @@ The script is served from GitHub Pages and run as `curl -fsSL … | sh`:
    Severity `required` (default) → a miss is ❌ and exits non-zero. `optional`
    → a miss is ⚠️ and does not fail the run. Use `optional` for nice-to-haves.
 
+   If the script has a maze animation (e.g. `lumivero-api_setup.sh`), bump
+   `MAZE_TOTAL` in `main()` to the new check count so the developer still
+   reaches the centre on the *last* check. It only paces the animation — a wrong
+   value just makes the avatar arrive a little early or late, never a failure.
+
 4. **Verify**: `shellcheck <app>_setup.sh && sh <app>_setup.sh` (e.g.
    `shellcheck lumivero-api_setup.sh && sh lumivero-api_setup.sh`). Both must be
    clean. (Project memory: always do this after editing a setup script.)

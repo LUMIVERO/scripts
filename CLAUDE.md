@@ -80,6 +80,7 @@ WSL detection lives in the `is_wsl()` helper (checks `WSL_INTEROP`/`WSL_DISTRO_N
 - **Colour degrades gracefully:** ANSI colour is emitted only when stdout is a TTY, `NO_COLOR` is unset, and `TERM` isn't `dumb`. Emoji icons are always printed (they're plain UTF-8). Transient "⏳ …" progress lines are shown only on a TTY and overwritten by the result.
 - **Prompts read from `/dev/tty`,** not stdin, so they work under `curl … | sh` (where the script itself occupies stdin). `confirm` probes that `/dev/tty` can actually be opened and declines quietly otherwise (headless/CI).
 - **Unattended runs:** set `SETUP_ASSUME_YES=1` to auto-accept every fix prompt.
+- **Maze animation:** on an interactive TTY the checks are framed as a labyrinth — a developer 🧑‍💻 walks the corridors (turning corners) toward a central trophy 🏆, advancing with each check, while results accumulate below; a failed check shows a dragon 🐉 on the developer's cell with a cheerful "Quest" fix hint. It's a full-screen redraw per step, so it runs **only** when stdout is a TTY and degrades to the plain line-by-line output otherwise (CI, pipes). `SETUP_NO_MAZE=1` opts out. The maze and its solution route are fixed data; `MAZE_TOTAL` in `main()` paces the hops to the check count (see the rule file).
 
 ## Conventions
 

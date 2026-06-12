@@ -66,6 +66,49 @@ PASS_COUNT=0
 FIXED_COUNT=0
 WARN_COUNT=0
 FAIL_COUNT=0
+CHECK_INDEX=0       # 1-based position of the current check (paces the maze)
+
+# ----------------------------------------------------------------------------
+# Maze animation state.
+#
+# A labyrinth the developer (🧑‍💻) walks — turning corners through the corridors
+# — toward the central trophy (🏆), advancing with each check. Active only on an
+# interactive terminal (MAZE_ON); otherwise the script falls back to plain
+# line-by-line results, so `curl … | sh` in CI is unaffected.
+# ----------------------------------------------------------------------------
+
+# The maze needs cursor control and redraws, so it runs only when stdout is an
+# interactive terminal. SETUP_NO_MAZE=1 opts out (e.g. for a quieter run).
+MAZE_ON=0
+if [ -t 1 ] && [ "${SETUP_NO_MAZE:-0}" != "1" ]; then
+  MAZE_ON=1
+fi
+
+# Maze data — a fixed, hand-verified perfect maze (generated once by a recursive
+# backtracker; the route is its unique entrance→centre solution, chosen for the
+# most direction changes). Grid cells: 1=wall, 0=corridor; rows joined by '|'.
+# The route is the ordered list of "row,col" cells the developer walks.
+MAZE_H=9                                      # grid is 23 cols × 9 rows
+CENTER_R=5                                    # trophy cell (centre of the maze)
+CENTER_C=11
+MAZE_GRID="11111111111111111111111|10100000100010001000001|10101110101010101111101|10100010001000100000001|10111011111111111111101|10001000100010001000101|11101110101010101010101|10000000101000100010001|11111111111111111111111"
+MAZE_ROUTE="1,1 2,1 3,1 4,1 5,1 5,2 5,3 6,3 7,3 7,4 7,5 7,6 7,7 6,7 5,7 5,6 5,5 4,5 3,5 3,4 3,3 2,3 1,3 1,4 1,5 1,6 1,7 2,7 3,7 3,8 3,9 2,9 1,9 1,10 1,11 2,11 3,11 3,12 3,13 2,13 1,13 1,14 1,15 2,15 3,15 3,16 3,17 3,18 3,19 3,20 3,21 4,21 5,21 6,21 7,21 7,20 7,19 6,19 5,19 5,18 5,17 6,17 7,17 7,16 7,15 6,15 5,15 5,14 5,13 6,13 7,13 7,12 7,11 6,11 5,11"
+
+MAZE_TOTAL=1            # number of checks (set in main; paces the hops)
+ROUTE_LEN=0            # number of cells on the route (set by maze_init)
+MAZE_STEP=0            # developer's index along the route
+DEVR=0                 # developer's current row …
+DEVC=0                 # … and column
+ROUTE_REMAINING=""     # route cells not yet reached
+RESULTS=""             # accumulated result lines, redrawn each frame
+MAZE_ELINE="${ESC}[K"  # erase-to-end-of-line, appended per row for flicker-free redraws
+
+G_WALL="⬛"     # maze wall
+G_OPEN="⬜"     # unexplored corridor
+G_TRAIL="🟩"   # corridor the developer has walked
+G_DEV="🧑‍💻"    # the developer
+G_TROPHY="🏆"  # the goal at the centre
+G_DRAGON="🐉"  # appears where a check failed
 
 # ----------------------------------------------------------------------------
 # Output helpers.
@@ -153,6 +196,189 @@ confirm() {
     [Yy] | [Yy][Ee][Ss]) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# ----------------------------------------------------------------------------
+# Maze rendering.
+#
+# Each frame is a full redraw: the maze on top, the accumulated pass/fail lines
+# (RESULTS) below. Used only when MAZE_ON=1; run_check otherwise prints results
+# live, line by line.
+# ----------------------------------------------------------------------------
+
+# Prepare the maze for rendering: split the grid into per-row variables
+# (ROW_0 … ROW_{H-1}, which draw_maze mutates as the trail is laid down), count
+# the route, and place the developer on its first cell (the entrance).
+maze_init() {
+  _g="$MAZE_GRID"
+  _i=0
+  while [ -n "$_g" ]; do
+    _row="${_g%%"|"*}"
+    case "$_g" in
+      *"|"*) _g="${_g#*"|"}" ;;
+      *) _g="" ;;
+    esac
+    eval "ROW_${_i}=\$_row"
+    _i=$((_i + 1))
+  done
+
+  ROUTE_LEN=0
+  # shellcheck disable=SC2086  # MAZE_ROUTE is a space-separated list to iterate
+  for _tok in $MAZE_ROUTE; do
+    ROUTE_LEN=$((ROUTE_LEN + 1))
+  done
+
+  ROUTE_REMAINING="$MAZE_ROUTE"
+  _first="${ROUTE_REMAINING%% *}"
+  ROUTE_REMAINING="${ROUTE_REMAINING#* }"
+  DEVR="${_first%,*}"
+  DEVC="${_first#*,}"
+  MAZE_STEP=0
+}
+
+# Lay down the trail: mark cell (row, col) in its row variable as walked ('2').
+mark_visited() {
+  _mr="$1"
+  _mc="$2"
+  eval "_row=\$ROW_${_mr}"
+  _pre=""
+  _i=0
+  _t="$_row"
+  while [ "$_i" -lt "$_mc" ]; do
+    _pre="${_pre}${_t%"${_t#?}"}"   # append first char of remaining row
+    _t="${_t#?}"
+    _i=$((_i + 1))
+  done
+  _post="${_t#?}"                     # drop the char at column _mc
+  eval "ROW_${_mr}=\"\${_pre}2\${_post}\""
+}
+
+# Draw the maze. <mode> is "walk" normally, or "dragon" to show 🐉 on the
+# developer's cell (where a check failed). Cell glyphs come from the (mutable)
+# row variables: 1→wall, 2→trail, 0→open corridor; the developer, trophy and
+# dragon are overlaid by position.
+draw_maze() {
+  _mode="$1"
+  _r=0
+  while [ "$_r" -lt "$MAZE_H" ]; do
+    eval "_spec=\$ROW_${_r}"
+    _line="   "
+    _c=0
+    while [ -n "$_spec" ]; do
+      _ch="${_spec%"${_spec#?}"}"     # first char
+      _spec="${_spec#?}"
+      if [ "$_r" -eq "$DEVR" ] && [ "$_c" -eq "$DEVC" ] && [ "$_mode" = "dragon" ]; then
+        _cell="$G_DRAGON"
+      elif [ "$_r" -eq "$CENTER_R" ] && [ "$_c" -eq "$CENTER_C" ]; then
+        _cell="$G_TROPHY"
+      elif [ "$_r" -eq "$DEVR" ] && [ "$_c" -eq "$DEVC" ]; then
+        _cell="$G_DEV"
+      elif [ "$_ch" = "1" ]; then
+        _cell="$G_WALL"
+      elif [ "$_ch" = "2" ]; then
+        _cell="$G_TRAIL"
+      else
+        _cell="$G_OPEN"
+      fi
+      _line="${_line}${_cell}"
+      _c=$((_c + 1))
+    done
+    printf '%s%s\n' "$_line" "$MAZE_ELINE"   # erase any leftover to the right
+    _r=$((_r + 1))
+  done
+}
+
+banner_maze() {
+  printf '%s%s  Lumivero Setup Maze%s   %sguide %s to the %s%s%s\n%s\n' \
+    "$BOLD" "$ICON_DONE" "$RESET" "$DIM" "$G_DEV" "$G_TROPHY" "$RESET" "$MAZE_ELINE" "$MAZE_ELINE"
+}
+
+# Redraw the whole frame flicker-free: open a synchronized update (ignored by
+# terminals that don't support it), home the cursor, and overwrite the previous
+# frame in place — no clear *before* drawing, so the screen never blanks. Each
+# row erases its own tail (MAZE_ELINE); a single clear-below at the end trims any
+# lines the previous frame left underneath.
+render_dashboard() {
+  printf '%s[?2026h%s[H' "$ESC" "$ESC"
+  banner_maze
+  draw_maze "$1"
+  printf '%s\n%s' "$MAZE_ELINE" "$RESULTS"
+  printf '%s[J%s[?2026l' "$ESC" "$ESC"
+}
+
+maze_sleep() {
+  sleep 0.07 2>/dev/null || true
+}
+
+# Walk the developer along the route up to step <target>, redrawing a frame per
+# cell so the movement (and its turns) is visible. The cell the developer leaves
+# becomes trail. The final cell is drawn in <final_mode> ("dragon" when the
+# check failed); intermediate cells are a normal walk.
+advance_to() {
+  _to="$1"
+  _fmode="$2"
+  [ "$_to" -gt $((ROUTE_LEN - 1)) ] && _to=$((ROUTE_LEN - 1))
+
+  if [ "$_to" -le "$MAZE_STEP" ]; then
+    render_dashboard "$_fmode"
+    maze_sleep
+    return 0
+  fi
+
+  while [ "$MAZE_STEP" -lt "$_to" ]; do
+    mark_visited "$DEVR" "$DEVC"
+    _tok="${ROUTE_REMAINING%% *}"
+    case "$ROUTE_REMAINING" in
+      *" "*) ROUTE_REMAINING="${ROUTE_REMAINING#* }" ;;
+      *) ROUTE_REMAINING="" ;;
+    esac
+    DEVR="${_tok%,*}"
+    DEVC="${_tok#*,}"
+    MAZE_STEP=$((MAZE_STEP + 1))
+    if [ "$MAZE_STEP" -eq "$_to" ]; then
+      render_dashboard "$_fmode"
+    else
+      render_dashboard walk
+    fi
+    maze_sleep
+  done
+}
+
+# Format one result line (no trailing newline) for the RESULTS buffer. Mirrors
+# print_result but returns the string instead of printing it live.
+format_result() {
+  _fstate="$1"
+  _flabel="$2"
+  _fdetail="${3:-}"
+
+  case "$_fstate" in
+    ok)    _ficon="$ICON_PASS"; _fcolor="$GREEN" ;;
+    fixed) _ficon="$ICON_FIX";  _fcolor="$GREEN" ;;
+    warn)  _ficon="$ICON_WARN"; _fcolor="$YELLOW" ;;
+    fail)  _ficon="$ICON_FAIL"; _fcolor="$RED" ;;
+    *)     _ficon="$ICON_INFO"; _fcolor="$BLUE" ;;
+  esac
+
+  if [ -n "$_fdetail" ]; then
+    printf '   %s  %s%s%s %s(%s)%s' "$_ficon" "$_fcolor" "$_flabel" "$RESET" "$DIM" "$_fdetail" "$RESET"
+  else
+    printf '   %s  %s%s%s' "$_ficon" "$_fcolor" "$_flabel" "$RESET"
+  fi
+}
+
+# Format the cheerful "a dragon blocks the path" block for a failed check (no
+# trailing newline). The detail already carries the fix hint.
+format_dragon() {
+  _dlabel="$1"
+  _ddetail="${2:-}"
+
+  printf '   %s  %s%sA dragon blocks the path!%s %s%s%s\n' \
+    "$G_DRAGON" "$BOLD" "$RED" "$RESET" "$RED" "$_dlabel" "$RESET"
+  if [ -n "$_ddetail" ]; then
+    printf '       %s %sQuest:%s %s%s%s\n' "$ICON_FIX" "$BOLD" "$RESET" "$DIM" "$_ddetail" "$RESET"
+  fi
+  printf '       %sEvery hero stumbles — clear it and run again. You'\''ve got this! 💪%s' \
+    "$DIM" "$RESET"
 }
 
 # ----------------------------------------------------------------------------
@@ -658,8 +884,15 @@ run_check() {
   _severity="${4:-required}"
 
   CHECK_TOTAL=$((CHECK_TOTAL + 1))
+  CHECK_INDEX=$((CHECK_INDEX + 1))
   CHECK_DETAIL=""
 
+  if [ "$MAZE_ON" = "1" ]; then
+    run_check_maze "$_label" "$_check" "$_fix" "$_severity"
+    return 0
+  fi
+
+  # ---- plain line-by-line presentation (non-interactive / opted out) --------
   print_pending "$_label"
 
   if "$_check"; then
@@ -695,12 +928,87 @@ run_check() {
   return 0
 }
 
+# Maze variant of run_check: resolves the check (running its fix if confirmed),
+# appends a result line — or a dragon block on an unresolved failure — to the
+# RESULTS buffer, then walks the developer to this check's cell. The fix runs
+# before the hop, so a successful fix shows ✅ and a happy walk rather than a
+# dragon. Counters are kept identical to the plain path so print_summary agrees.
+run_check_maze() {
+  _label="$1"
+  _check="$2"
+  _fix="${3:-}"
+  _severity="${4:-required}"
+
+  # This check's step along the route; the last check lands on the centre.
+  _target=$(( CHECK_INDEX * (ROUTE_LEN - 1) / MAZE_TOTAL ))
+  [ "$_target" -gt $((ROUTE_LEN - 1)) ] && _target=$((ROUTE_LEN - 1))
+
+  _state=""
+  if "$_check"; then
+    _state="ok"
+  else
+    _detail="$CHECK_DETAIL"
+    if [ -n "$_fix" ] && confirm "Attempt to fix \"$_label\" now?"; then
+      print_fixing "$_label"
+      if "$_fix"; then
+        CHECK_DETAIL=""
+        "$_check" && _state="fixed"
+      fi
+      [ -z "$_state" ] && _detail="${CHECK_DETAIL:-$_detail}"
+    fi
+    if [ -z "$_state" ]; then
+      if [ "$_severity" = "optional" ]; then
+        _state="warn"
+      else
+        _state="fail"
+      fi
+    fi
+  fi
+
+  case "$_state" in
+    ok)
+      _rline="$(format_result ok "$_label" "$CHECK_DETAIL")"
+      PASS_COUNT=$((PASS_COUNT + 1)) ;;
+    fixed)
+      _rline="$(format_result fixed "$_label" "$CHECK_DETAIL")"
+      FIXED_COUNT=$((FIXED_COUNT + 1)) ;;
+    warn)
+      _rline="$(format_result warn "$_label" "$_detail")"
+      WARN_COUNT=$((WARN_COUNT + 1)) ;;
+    *)
+      _rline="$(format_dragon "$_label" "$_detail")"
+      FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+  esac
+
+  RESULTS="${RESULTS}${_rline}
+"
+
+  if [ "$_state" = "fail" ]; then
+    advance_to "$_target" dragon
+  else
+    advance_to "$_target" walk
+  fi
+}
+
 # ----------------------------------------------------------------------------
 # The checklist.
 # ----------------------------------------------------------------------------
 
 main() {
-  banner
+  # Number of run_check calls below — paces the maze so the developer reaches
+  # the centre on the final check. Keep in sync when adding/removing a check
+  # (it only affects the animation; the checks themselves are unaffected).
+  MAZE_TOTAL=8
+  [ "$MAZE_TOTAL" -lt 1 ] && MAZE_TOTAL=1
+
+  if [ "$MAZE_ON" = "1" ]; then
+    RESULTS=""
+    maze_init
+    render_dashboard walk
+    maze_sleep
+  else
+    banner
+  fi
 
   # 1. Operating system — the foundation every other check builds on.
   run_check "Supported operating system" check_os "" required
@@ -748,12 +1056,22 @@ main() {
   print_summary
 
   if [ "$FAIL_COUNT" -gt 0 ]; then
-    printf '\n%s%s Setup incomplete — %d required check(s) need attention.%s\n\n' \
-      "$RED" "$ICON_FAIL" "$FAIL_COUNT" "$RESET"
+    if [ "$MAZE_ON" = "1" ]; then
+      printf '\n%s%s %d dragon(s) still guard the path — clear the quest(s) above and run again.%s\n\n' \
+        "$RED" "$G_DRAGON" "$FAIL_COUNT" "$RESET"
+    else
+      printf '\n%s%s Setup incomplete — %d required check(s) need attention.%s\n\n' \
+        "$RED" "$ICON_FAIL" "$FAIL_COUNT" "$RESET"
+    fi
     exit 1
   fi
 
-  printf '\n%s%s Environment ready.%s\n\n' "$GREEN" "$ICON_DONE" "$RESET"
+  if [ "$MAZE_ON" = "1" ]; then
+    printf '\n%s%s You reached the centre — environment ready! 🏆🎉%s\n\n' \
+      "$GREEN" "$BOLD" "$RESET"
+  else
+    printf '\n%s%s Environment ready.%s\n\n' "$GREEN" "$ICON_DONE" "$RESET"
+  fi
 }
 
 main "$@"
