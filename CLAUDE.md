@@ -68,10 +68,10 @@ A worked template (`check_git`/`fix_git`) is in the comment block in `main()`.
 The OS check is always first because it sets `OS_FAMILY` (`macos` | `debian`), which the package-installer relies on. It has no fix (you can't install an OS). Supported matrix:
 
 - **macOS** (`uname -s` = `Darwin`) → `OS_FAMILY=macos`
-- **Debian Linux** and **Ubuntu Linux** (`/etc/os-release` `ID`) → `OS_FAMILY=debian`
+- **Debian Linux**, **Ubuntu Linux**, and **Pop!_OS** (`/etc/os-release` `ID` of `debian`/`ubuntu`/`pop`; Pop!_OS is Ubuntu-derived and apt-based) → `OS_FAMILY=debian`
 - **Ubuntu under Windows WSL** — the only supported Windows path → `OS_FAMILY=debian`
 
-Explicitly rejected: Cygwin/MinGW/MSYS bash environments, and any other distro/OS.
+Explicitly rejected: Cygwin/MinGW/MSYS bash environments, and any other distro/OS. An unsupported OS is **fatal** — `main()` bails immediately after the OS check (when `check_os` leaves `OS_FAMILY` empty) instead of running the remaining checks, since they all install via `OS_FAMILY`.
 
 WSL detection lives in the `is_wsl()` helper (checks `WSL_INTEROP`/`WSL_DISTRO_NAME` env vars and `/proc/version`). Plain WSL is sufficient — there is no separate WSLg (graphical) requirement.
 

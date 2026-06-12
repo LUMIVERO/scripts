@@ -400,6 +400,12 @@ check_os() {
           CHECK_DETAIL="Ubuntu Linux"
           return 0
           ;;
+        pop)
+          # Pop!_OS is Ubuntu-derived and apt-based, so it uses the debian family.
+          OS_FAMILY="debian"
+          CHECK_DETAIL="Pop!_OS Linux"
+          return 0
+          ;;
         *)
           CHECK_DETAIL="unsupported Linux distribution '${_distro}'"
           return 1
@@ -1104,6 +1110,17 @@ main() {
 
   # 1. Operating system — the foundation every other check builds on.
   run_check "Supported operating system" check_os "" required
+
+  # An unsupported OS is fatal: every later check installs via OS_FAMILY, which
+  # check_os sets only on a supported system, so the rest of the run could do
+  # nothing useful. check_os leaves OS_FAMILY empty on every failure path — bail
+  # with the supported matrix rather than limping on through checks that can't pass.
+  if [ -z "$OS_FAMILY" ]; then
+    printf '\n%s%s Unsupported operating system — stopping.%s\n' "$RED" "$ICON_FAIL" "$RESET"
+    printf '%s   Supported: macOS, Debian, Ubuntu, Pop!_OS, or Ubuntu under Windows WSL.%s\n\n' \
+      "$DIM" "$RESET"
+    exit 1
+  fi
 
   # ---------------------------------------------------------------------------
   # Add further checks below. Each is one run_check line backed by a check
