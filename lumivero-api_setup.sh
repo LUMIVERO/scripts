@@ -597,6 +597,48 @@ fix_claude() {
   fi
 }
 
+# The Lumivero API repository and where it lives on GitHub. The checkout is
+# expected in the developer's current working directory (curl … | sh runs there).
+REPO_NAME="lumivero-api"
+REPO_URL="https://github.com/lumivero/lumivero-api"
+
+# The lumivero-api checkout. Satisfied two ways: the current directory is already
+# the repo (its basename is lumivero-api — the developer cd'd in earlier), or a
+# lumivero-api subdirectory is present in the current directory. Cloning lives in
+# the fix; this only reports presence.
+check_repo() {
+  _cwd="$(pwd)"
+  if [ "${_cwd##*/}" = "$REPO_NAME" ]; then
+    CHECK_DETAIL="already inside ${REPO_NAME}"
+    return 0
+  fi
+  if [ -d "$REPO_NAME" ]; then
+    CHECK_DETAIL="present at ./${REPO_NAME}"
+    return 0
+  fi
+  CHECK_DETAIL="not present in ${_cwd} — clone ${REPO_URL}"
+  return 1
+}
+
+# Clone the repository into the current directory. Prefer the GitHub CLI when it
+# is present (it carries the auth from check #6, so it works for the private org
+# repo without a separate git credential helper) and fall back to git over HTTPS.
+# curl … | sh cannot change the caller's shell directory, so we can't honour the
+# `cd lumivero-api` step ourselves — we point the developer at it instead.
+fix_repo() {
+  if have_cmd gh; then
+    gh repo clone "lumivero/${REPO_NAME}" || return 1
+  elif have_cmd git; then
+    git clone "$REPO_URL" || return 1
+  else
+    CHECK_DETAIL="neither gh nor git available to clone ${REPO_URL}"
+    return 1
+  fi
+
+  printf '   %s  %sCloned into ./%s — run: cd %s%s\n' \
+    "$ICON_INFO" "$DIM" "$REPO_NAME" "$REPO_NAME" "$RESET"
+}
+
 # ----------------------------------------------------------------------------
 # Check driver.
 # ----------------------------------------------------------------------------
@@ -698,6 +740,10 @@ main() {
 
   # 7. Claude Code — installed, on PATH, up to date, and signed in.
   run_check "Claude Code is installed and logged in" check_claude fix_claude required
+
+  # 8. lumivero-api repository — checked out in the current directory (or we are
+  #    already inside it). Depends on the GitHub CLI (6) for the private clone.
+  run_check "lumivero-api repository is checked out" check_repo fix_repo required
 
   print_summary
 
