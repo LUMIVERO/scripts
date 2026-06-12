@@ -263,6 +263,51 @@ check_os() {
   esac
 }
 
+# Docker must be both installed (the `docker` CLI on PATH) and available (its
+# daemon reachable, i.e. actually running). On macOS we don't auto-install —
+# the developer is pointed at OrbStack — so the detail strings differ per OS.
+check_docker() {
+  if ! have_cmd docker; then
+    if [ "$OS_FAMILY" = "macos" ]; then
+      CHECK_DETAIL="not installed; install OrbStack (https://orbstack.dev) and start it, then re-run"
+    else
+      CHECK_DETAIL="not installed"
+    fi
+    return 1
+  fi
+
+  if docker info >/dev/null 2>&1; then
+    CHECK_DETAIL="installed and running"
+    return 0
+  fi
+
+  if [ "$OS_FAMILY" = "macos" ]; then
+    CHECK_DETAIL="installed but not running; start OrbStack and re-run"
+  else
+    CHECK_DETAIL="installed but daemon not reachable; start Docker (you may need to log out and back in for the docker group) and re-run"
+  fi
+  return 1
+}
+
+# Auto-install Docker only on Linux, via the official convenience script, then
+# add the current user to the docker group. On macOS there is no automated fix:
+# the developer is asked to install OrbStack and start it.
+fix_docker() {
+  if [ "$OS_FAMILY" != "debian" ]; then
+    CHECK_DETAIL="install OrbStack (https://orbstack.dev), start it, then re-run"
+    return 1
+  fi
+
+  curl -fsSL https://get.docker.com | sh || return 1
+
+  _user="${USER:-$(id -un)}"
+  if have_cmd sudo; then
+    sudo usermod -aG docker "$_user" || return 1
+  else
+    usermod -aG docker "$_user" || return 1
+  fi
+}
+
 # ----------------------------------------------------------------------------
 # Check driver.
 # ----------------------------------------------------------------------------
@@ -345,6 +390,9 @@ main() {
   #
   # Pass severity "optional" for nice-to-haves so they warn instead of fail.
   # ---------------------------------------------------------------------------
+
+  # 2. Docker — installed and its daemon reachable.
+  run_check "Docker is installed and available" check_docker fix_docker required
 
   print_summary
 
