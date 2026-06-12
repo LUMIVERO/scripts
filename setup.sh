@@ -213,6 +213,16 @@ install_pkg() {
   esac
 }
 
+# Run a command as root: via sudo when available, directly otherwise (e.g. when
+# already root inside a container). Mirrors the sudo handling in install_pkg.
+run_root() {
+  if have_cmd sudo; then
+    sudo "$@"
+  else
+    "$@"
+  fi
+}
+
 # ----------------------------------------------------------------------------
 # Individual checks. Each returns 0 when satisfied and may set CHECK_DETAIL.
 # ----------------------------------------------------------------------------
@@ -448,6 +458,68 @@ fix_acr() {
   return 1
 }
 
+# GitHub CLI — installed and authenticated. `gh auth status` exits 0 only when
+# there is a usable credential, so it doubles as the login probe; the
+# interactive `gh auth login` lives in the fix, never here, so a check never
+# blocks waiting for a browser.
+check_gh() {
+  if ! have_cmd gh; then
+    CHECK_DETAIL="not installed"
+    return 1
+  fi
+
+  if ! gh auth status >/dev/null 2>&1; then
+    CHECK_DETAIL="installed but not logged in — run 'gh auth login'"
+    return 1
+  fi
+
+  _ver="$(gh --version 2>/dev/null | head -n1 | cut -d' ' -f3)" || _ver=""
+  CHECK_DETAIL="${_ver:+v${_ver}, }logged in"
+  return 0
+}
+
+# Install the GitHub CLI when missing — Homebrew on macOS, the official GitHub
+# apt repository on Debian/Ubuntu (the distro package lags badly) — then run the
+# interactive `gh auth login`. Login input is read from /dev/tty so the prompts
+# work under `curl … | sh`, where the script itself occupies stdin.
+fix_gh() {
+  if ! have_cmd gh; then
+    case "$OS_FAMILY" in
+      macos)
+        install_pkg gh gh || return 1
+        ;;
+      debian)
+        have_cmd wget || run_root apt-get install -y wget || {
+          CHECK_DETAIL="could not install wget (needed to fetch the GitHub CLI keyring)"
+          return 1
+        }
+        run_root mkdir -p -m 755 /etc/apt/keyrings || return 1
+        wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+          | run_root tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null || return 1
+        run_root chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg || return 1
+        _arch="$(dpkg --print-architecture)"
+        printf 'deb [arch=%s signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' "$_arch" \
+          | run_root tee /etc/apt/sources.list.d/github-cli.list >/dev/null || return 1
+        run_root apt-get update || return 1
+        run_root apt-get install -y gh || return 1
+        ;;
+      *)
+        CHECK_DETAIL="no automated installer for this environment"
+        return 1
+        ;;
+    esac
+  fi
+
+  # Authenticate if there is no usable credential yet. gh auth login is
+  # interactive; read its prompts from the terminal, not the piped-in script.
+  if ! gh auth status >/dev/null 2>&1; then
+    if ! gh auth login </dev/tty; then
+      CHECK_DETAIL="login failed — run 'gh auth login'"
+      return 1
+    fi
+  fi
+}
+
 # ----------------------------------------------------------------------------
 # Check driver.
 # ----------------------------------------------------------------------------
@@ -543,6 +615,9 @@ main() {
   # 5. Azure + ACR login — signed in and able to reach the uluruscacr registry.
   #    Depends on the Azure CLI (4) and Docker (2), so it comes last.
   run_check "Logged in to Azure and ACR uluruscacr accessible" check_acr fix_acr required
+
+  # 6. GitHub CLI — installed and authenticated (gh auth login).
+  run_check "GitHub CLI is installed and logged in" check_gh fix_gh required
 
   print_summary
 
