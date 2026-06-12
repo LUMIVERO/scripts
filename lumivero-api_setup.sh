@@ -391,6 +391,41 @@ is_wsl() {
   grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null
 }
 
+# Native Windows is unsupported: the API environment requires Ubuntu under WSL.
+# A POSIX `sh` exists on Windows only via a Cygwin/MinGW/MSYS shell (Git Bash et
+# al.), where `uname -s` reports CYGWIN*/MINGW*/MSYS* — whereas Ubuntu under WSL
+# reports Linux (and is recognised by is_wsl). So when we see one of those shells
+# we are on Windows but not in WSL: stop immediately, before the maze or any
+# check/fix runs (we must never animate or try to install Docker here), and
+# explain how to get Ubuntu onto WSL. Exits the script non-zero on a match.
+bail_if_windows_without_wsl() {
+  case "$(uname -s)" in
+    CYGWIN* | MINGW* | MSYS*) ;;   # a Windows shell; WSL would report Linux
+    *) return 0 ;;
+  esac
+
+  printf '\n%s%s  Windows detected — Ubuntu under WSL is required%s\n\n' \
+    "$BOLD" "$ICON_FAIL" "$RESET"
+  printf '%sThe Lumivero API environment runs on Ubuntu under WSL (Windows\n' "$DIM"
+  printf 'Subsystem for Linux), not directly on Windows. Set that up first,\n'
+  printf 'then run this script again from inside the Ubuntu shell.%s\n\n' "$RESET"
+
+  printf '%s%s  Install Ubuntu under WSL%s\n' "$BOLD" "$ICON_INFO" "$RESET"
+  printf '  1. Open %sPowerShell%s or %sCommand Prompt%s as Administrator.\n' \
+    "$BOLD" "$RESET" "$BOLD" "$RESET"
+  printf '  2. Run %swsl --install -d Ubuntu%s\n' "$BOLD" "$RESET"
+  printf '  3. Reboot if prompted, then launch %sUbuntu%s from the Start menu\n' \
+    "$BOLD" "$RESET"
+  printf '     and create your UNIX username and password.\n'
+  printf '  4. From inside that Ubuntu shell, re-run this script:\n'
+  printf '     %scurl -fsSL https://lumivero.github.io/scripts/lumivero-api_setup.sh | sh%s\n\n' \
+    "$BOLD" "$RESET"
+  printf '%sMore detail: https://learn.microsoft.com/windows/wsl/install%s\n\n' \
+    "$DIM" "$RESET"
+
+  exit 1
+}
+
 # ----------------------------------------------------------------------------
 # Reusable primitives for the checks registered in main().
 # ----------------------------------------------------------------------------
@@ -995,6 +1030,10 @@ run_check_maze() {
 # ----------------------------------------------------------------------------
 
 main() {
+  # Windows without WSL has no supported path: bail with guidance before the
+  # maze or any check runs, rather than animating and trying to install Docker.
+  bail_if_windows_without_wsl
+
   # Number of run_check calls below — paces the maze so the developer reaches
   # the centre on the final check. Keep in sync when adding/removing a check
   # (it only affects the animation; the checks themselves are unaffected).
