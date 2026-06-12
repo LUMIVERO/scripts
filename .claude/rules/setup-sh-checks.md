@@ -69,10 +69,18 @@ The script is served from GitHub Pages and run as `curl -fsSL … | sh`:
   missing, skips if line already present). The low-level primitive; prefer the
   two helpers below for shell-startup lines so the right files are picked.
 - `persist_env_line <line>` — append a regular env-var export (`export VAR=…`)
-  to the always-sourced files: zsh `~/.zshenv` + bash `~/.bash_profile`.
-- `persist_path_line <line>` — append a PATH edit (`export PATH=…:$PATH`) to the
-  login files: zsh `~/.zprofile` + bash `~/.bash_profile`. Login (not `.zshenv`)
-  so a nested non-login shell doesn't re-prepend and duplicate the entry.
+  to the files every shell reads: zsh `~/.zshenv` (always sourced) + bash
+  `~/.bash_profile` (login) and `~/.bashrc` (interactive non-login). Covering
+  both bash files is what lets a bare `bash` see the var — `~/.bash_profile`
+  alone reaches only login shells (a fresh WSL window), not a `bash` started in
+  the current session.
+- `persist_path_line <line>` — append a PATH edit to the same reach as
+  `persist_env_line`: zsh `~/.zprofile` (login) + bash `~/.bash_profile` (login)
+  and `~/.bashrc` (interactive non-login). Because `~/.bashrc` is re-sourced by
+  every nested interactive shell, the line **must** be the self-guarding one-line
+  `case` form (see `DEVCONTAINER_PATH_LINE` / `CLAUDE_PATH_LINE`) so it prepends
+  only when the directory is absent — an unguarded `export PATH=…:$PATH` here
+  would stack a duplicate every time.
 - `CHECK_DETAIL` — the per-check context string. Reset to "" by the driver
   before each check and each fix re-check; just assign it.
 - `OS_FAMILY` — `macos` | `debian`, set by `check_os` (always check #1). Branch
@@ -112,15 +120,27 @@ The script is served from GitHub Pages and run as `curl -fsSL … | sh`:
   one constant for the persisted line between the check and the fix (as
   `DEVCONTAINER_PATH_LINE` / `CLAUDE_PATH_LINE` / `GITHUB_TOKEN_LINE` do) so the
   grep and the append can never drift.
-- **Put each export in the file its kind belongs in**, per shell convention:
-  regular env vars via `persist_env_line` (zsh `~/.zshenv`, bash `~/.bash_profile`),
-  PATH edits via `persist_path_line` (zsh `~/.zprofile`, bash `~/.bash_profile`).
-  Both helpers cover bash *and* zsh, so a fix run under either sets up the other.
+- **A login-only write doesn't reach a bare `bash`.** Writing a var or PATH edit
+  to `~/.bash_profile` alone means a fresh WSL window (a *login* shell) sees it but
+  typing `bash` in the current session (an *interactive non-login* shell, which
+  reads only `~/.bashrc`) does not — the developer is told to "open a new terminal"
+  and it still doesn't work until a full re-login. So `persist_env_line` /
+  `persist_path_line` write `~/.bashrc` **and** `~/.bash_profile` for bash (zsh's
+  `~/.zshenv` is already always-sourced). A `check_` that greps the persisted
+  files must grep all of them (including `~/.bashrc`) so an install persisted
+  before `~/.bashrc` was added re-runs its fix once to backfill, then stays
+  satisfied — share one file list between the check loop and the helper.
 - **Literal `$HOME`/`$PATH` in startup lines must stay unexpanded** so the startup
   shell expands them later. Single-quote the line and silence the resulting
   shellcheck warning with an inline `# shellcheck disable=SC2016` (the repo
   already uses inline directives, e.g. `SC1091`). Do not "fix" it to double quotes.
-- **Guard PATH dedup** before exporting: `case ":$PATH:" in *":$dir:"*) ;; *) … ;; esac`.
+- **A persisted PATH line must self-guard** because `~/.bashrc` re-sources it on
+  every interactive shell (and nested ones): persist the one-line form
+  `case ":$PATH:" in *":$dir:"*) ;; *) export PATH="$dir:$PATH" ;; esac` (literal
+  `$dir`/`$PATH`/`$HOME` — see above), not a bare `export PATH=…:$PATH`, so it
+  prepends only when the directory is absent and can't stack duplicates. The
+  separate `export PATH=…` a fix runs to update the *current* process keeps its
+  own inline `case ":$PATH:" in *":$dir:"*) ;; *) … ;; esac` guard.
 - **Prefer self-contained installers.** E.g. the devcontainers install script
   bundles its own Node, so the check needs no system npm — keeps the constraint.
 - **Prompts** must come from `confirm` (reads `/dev/tty`, honours

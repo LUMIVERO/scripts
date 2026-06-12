@@ -253,42 +253,61 @@ ensure_line_in_file() {
   record_profile_changed "$_file"
 }
 
-# Where each kind of export belongs, by shell convention:
+# Where each kind of export belongs, by shell convention. The aim is that the
+# lines reach *every* shell a developer opens. The trap to avoid: bash reads
+# ~/.bash_profile only for a *login* shell, so a fresh WSL window picks up a
+# change written there, but typing `bash` in the current session — an
+# interactive non-login shell, which reads only ~/.bashrc — does not. We
+# therefore cover both bash startup files.
 #
-#   * A regular environment variable (export VAR=value) goes in an
-#     always-sourced file — zsh's ~/.zshenv (read by every zsh, login or not)
-#     and bash's ~/.bash_profile (login shell).
-#   * A PATH edit (export PATH=…:$PATH) goes in a login file — zsh's ~/.zprofile
-#     and bash's ~/.bash_profile — so a nested non-login shell doesn't re-source
-#     it and prepend the same entry twice.
+#   * zsh reads ~/.zshenv for every shell (login or not), so it alone carries an
+#     env var; a PATH edit additionally goes in the login file ~/.zprofile.
+#   * bash has no always-sourced file, so env vars and PATH edits are written to
+#     BOTH ~/.bash_profile (login) and ~/.bashrc (interactive non-login) — each
+#     file carries the line independently, so neither needs to source the other.
 #
-# Both helpers append idempotently to both shells' files, so a fix run under
-# either shell sets up the other too.
+# A regular env var (export VAR=value) is idempotent, so re-sourcing it in a
+# nested shell is harmless. A PATH prepend is not — unguarded, it duplicates the
+# entry every time ~/.bashrc is re-sourced — so persist_path_line is given the
+# self-guarding line form (see DEVCONTAINER_PATH_LINE) that prepends only when
+# the directory is absent.
+#
+# Both helpers append idempotently, so a fix run under either shell sets up the
+# other too.
 
-# Persist a regular environment-variable line: zsh ~/.zshenv + bash ~/.bash_profile.
+# Persist a regular environment-variable line so every shell sees it: zsh
+# ~/.zshenv (always sourced) + bash ~/.bash_profile (login) and ~/.bashrc
+# (interactive non-login).
 persist_env_line() {
   ensure_line_in_file "${HOME}/.zshenv" "$1"
   ensure_line_in_file "${HOME}/.bash_profile" "$1"
+  ensure_line_in_file "${HOME}/.bashrc" "$1"
 }
 
-# Persist a PATH line: zsh ~/.zprofile + bash ~/.bash_profile.
+# Persist a PATH line so every shell sees it: zsh ~/.zprofile (login) + bash
+# ~/.bash_profile (login) and ~/.bashrc (interactive non-login). The line must be
+# the self-guarding form (see DEVCONTAINER_PATH_LINE) so re-sourcing ~/.bashrc in
+# a nested shell cannot prepend the directory twice.
 persist_path_line() {
   ensure_line_in_file "${HOME}/.zprofile" "$1"
   ensure_line_in_file "${HOME}/.bash_profile" "$1"
+  ensure_line_in_file "${HOME}/.bashrc" "$1"
 }
 
 # True when <line> (a PATH export persisted by persist_path_line) is already
-# present in both login files it writes — zsh ~/.zprofile and bash
-# ~/.bash_profile. This is the read counterpart of persist_path_line and the
-# same file-as-source-of-truth test the env-var checks use (check_github_token
-# et al. grep the dotfile rather than the live environment): once the line is
-# persisted, a fresh login shell puts the directory on PATH, so a check can
-# treat a tool installed at its known location as satisfied even when the
+# present in every startup file it writes — zsh ~/.zprofile and bash
+# ~/.bash_profile + ~/.bashrc. This is the read counterpart of persist_path_line
+# and the same file-as-source-of-truth test the env-var checks use
+# (check_github_token et al. grep the dotfile rather than the live environment):
+# once the line is persisted, a new shell puts the directory on PATH, so a check
+# can treat a tool installed at its known location as satisfied even when the
 # current `curl … | sh` process — which cannot see edits to the parent shell's
-# startup files — does not yet have it on PATH. Without this, such a check would
+# startup files — does not yet have it on PATH. Requiring all three (not only the
+# login files) means an install persisted before ~/.bashrc was added re-runs its
+# fix once to backfill it, then stays satisfied. Without this, such a check would
 # report "not on PATH" and re-run its fix on every invocation.
 path_line_persisted() {
-  for _rc in "${HOME}/.zprofile" "${HOME}/.bash_profile"; do
+  for _rc in "${HOME}/.zprofile" "${HOME}/.bash_profile" "${HOME}/.bashrc"; do
     grep -qF "$1" "$_rc" 2>/dev/null || return 1
   done
   return 0
@@ -454,10 +473,13 @@ DEVCONTAINER_BIN_DIR="${HOME}/.devcontainers/bin"
 # The PATH line the fix persists for the devcontainer CLI. A single constant so
 # the check (path_line_persisted) and the fix (persist_path_line) test and write
 # the exact same string — the same single-source-of-truth pattern as
-# GITHUB_TOKEN_LINE. Literal $HOME/$PATH so the startup shell expands them later,
+# GITHUB_TOKEN_LINE. It is the self-guarding form: a one-line `case` that prepends
+# the directory only when it is not already on PATH, so it is safe to source from
+# ~/.bashrc on every interactive shell (including nested ones) without stacking
+# duplicate entries. Literal $HOME/$PATH so the startup shell expands them later,
 # not this script now (hence the SC2016 disable).
 # shellcheck disable=SC2016
-DEVCONTAINER_PATH_LINE='export PATH="$HOME/.devcontainers/bin:$PATH"'
+DEVCONTAINER_PATH_LINE='case ":$PATH:" in *":$HOME/.devcontainers/bin:"*) ;; *) export PATH="$HOME/.devcontainers/bin:$PATH" ;; esac'
 
 # devcontainer CLI — installed and runnable. Satisfied when it is on the live
 # PATH, or when it is installed at its default location and that directory's
@@ -670,8 +692,8 @@ fix_gh() {
 }
 
 # GITHUB_ACCESS_TOKEN wired into the shell profile — a regular environment
-# variable, so it lives in the always-sourced files (zsh ~/.zshenv, bash
-# ~/.bash_profile). The Lumivero API tooling reads this env var. Rather than
+# variable, so it lives in the shell startup files (zsh ~/.zshenv; bash
+# ~/.bash_profile and ~/.bashrc). The Lumivero API tooling reads this env var. Rather than
 # write the secret to disk, we persist a command that resolves it at shell
 # startup from the GitHub CLI credential (established by the GitHub CLI check
 # above) — so the token itself never lands in a dotfile, and a rotated `gh`
@@ -681,18 +703,18 @@ fix_gh() {
 # shellcheck disable=SC2016
 GITHUB_TOKEN_LINE='export GITHUB_ACCESS_TOKEN="$(gh auth token 2>/dev/null)"'
 
-# Satisfied when that exact line is present in both env-var files (~/.zshenv and
-# ~/.bash_profile). The same fixed-string test ensure_line_in_file uses to
-# append, so the two agree.
+# Satisfied when that exact line is present in every env-var file persist_env_line
+# writes (~/.zshenv, ~/.bash_profile, ~/.bashrc). The same fixed-string test
+# ensure_line_in_file uses to append, so the two agree.
 check_github_token() {
-  for _rc in "${HOME}/.zshenv" "${HOME}/.bash_profile"; do
+  for _rc in "${HOME}/.zshenv" "${HOME}/.bash_profile" "${HOME}/.bashrc"; do
     if ! grep -qF "$GITHUB_TOKEN_LINE" "$_rc" 2>/dev/null; then
       CHECK_DETAIL="not set in ${_rc##*/}"
       return 1
     fi
   done
 
-  CHECK_DETAIL="set via 'gh auth token' in ~/.zshenv and ~/.bash_profile"
+  CHECK_DETAIL="set via 'gh auth token' in your shell startup files"
   return 0
 }
 
@@ -706,7 +728,7 @@ fix_github_token() {
 
 # LUV_TOKEN_CHECKSUM_SECRET — a per-developer secret the Lumivero API tooling
 # uses to checksum tokens. A regular environment variable, so it lives in the
-# always-sourced files (zsh ~/.zshenv, bash ~/.bash_profile). Unlike
+# shell startup files (zsh ~/.zshenv; bash ~/.bash_profile and ~/.bashrc). Unlike
 # GITHUB_ACCESS_TOKEN (a fixed resolver command), this is a generated random
 # value persisted verbatim, so the check matches an `export
 # LUV_TOKEN_CHECKSUM_SECRET=` line by pattern (the value differs per machine)
@@ -737,17 +759,17 @@ checksum_secret_in() {
   exported_value_in "$1" "$CHECKSUM_SECRET_VAR"
 }
 
-# Satisfied when CHECKSUM_SECRET_VAR is exported (to a non-empty value) in both
-# env-var files (~/.zshenv and ~/.bash_profile).
+# Satisfied when CHECKSUM_SECRET_VAR is exported (to a non-empty value) in every
+# env-var file persist_env_line writes (~/.zshenv, ~/.bash_profile, ~/.bashrc).
 check_checksum_secret() {
-  for _rc in "${HOME}/.zshenv" "${HOME}/.bash_profile"; do
+  for _rc in "${HOME}/.zshenv" "${HOME}/.bash_profile" "${HOME}/.bashrc"; do
     _cur="$(checksum_secret_in "$_rc")" || _cur=""
     if [ -z "$_cur" ]; then
       CHECK_DETAIL="not set in ${_rc##*/}"
       return 1
     fi
   done
-  CHECK_DETAIL="set in ~/.zshenv and ~/.bash_profile"
+  CHECK_DETAIL="set in your shell startup files"
   return 0
 }
 
@@ -759,6 +781,9 @@ fix_checksum_secret() {
   _val="$(checksum_secret_in "${HOME}/.zshenv")" || _val=""
   if [ -z "$_val" ]; then
     _val="$(checksum_secret_in "${HOME}/.bash_profile")" || _val=""
+  fi
+  if [ -z "$_val" ]; then
+    _val="$(checksum_secret_in "${HOME}/.bashrc")" || _val=""
   fi
   if [ -z "$_val" ]; then
     if ! have_cmd openssl; then
@@ -783,10 +808,11 @@ CLAUDE_BIN_DIR="${HOME}/.local/bin"
 
 # The PATH line the fix persists for Claude Code — the single source of truth
 # shared by the check (path_line_persisted) and the fix (persist_path_line), as
-# with DEVCONTAINER_PATH_LINE above. Literal $HOME/$PATH for the startup shell
-# (SC2016).
+# with DEVCONTAINER_PATH_LINE above, and likewise the self-guarding `case` form so
+# it can be sourced from ~/.bashrc on every shell without duplicating the entry.
+# Literal $HOME/$PATH for the startup shell (SC2016).
 # shellcheck disable=SC2016
-CLAUDE_PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+CLAUDE_PATH_LINE='case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
 
 # Claude Code (the `claude` CLI) — installed, reachable, signed in, and current.
 # It is "reachable" when on the live PATH, or installed at its default location
@@ -868,8 +894,8 @@ fix_claude() {
 # JFrog credentials the Lumivero API tooling reads as JFROG_CREDENTIALS_USR /
 # JFROG_CREDENTIALS_PSW — the Jenkins-style binding of a single username/token
 # credential (USR = JFrog username, PSW = a JFrog Identity Token). Both are
-# regular environment variables, so they live in the always-sourced files (zsh
-# ~/.zshenv, bash ~/.bash_profile), persisted verbatim like
+# regular environment variables, so they live in the shell startup files (zsh
+# ~/.zshenv; bash ~/.bash_profile and ~/.bashrc), persisted verbatim like
 # LUV_TOKEN_CHECKSUM_SECRET: the values are hand-entered secrets with no source
 # to derive them from, so the resolver-line trick used for GITHUB_ACCESS_TOKEN
 # does not apply. The developer creates the token in the JFrog UI and pastes it.
@@ -877,10 +903,10 @@ JFROG_USR_VAR="JFROG_CREDENTIALS_USR"
 JFROG_PSW_VAR="JFROG_CREDENTIALS_PSW"
 JFROG_URL="https://lumivero.jfrog.io/"
 
-# Satisfied when both credential vars are exported (to non-empty values) in both
-# env-var files (~/.zshenv and ~/.bash_profile).
+# Satisfied when both credential vars are exported (to non-empty values) in every
+# env-var file persist_env_line writes (~/.zshenv, ~/.bash_profile, ~/.bashrc).
 check_jfrog_creds() {
-  for _rc in "${HOME}/.zshenv" "${HOME}/.bash_profile"; do
+  for _rc in "${HOME}/.zshenv" "${HOME}/.bash_profile" "${HOME}/.bashrc"; do
     for _var in "$JFROG_USR_VAR" "$JFROG_PSW_VAR"; do
       _cur="$(exported_value_in "$_rc" "$_var")" || _cur=""
       if [ -z "$_cur" ]; then
@@ -889,7 +915,7 @@ check_jfrog_creds() {
       fi
     done
   done
-  CHECK_DETAIL="set in ~/.zshenv and ~/.bash_profile"
+  CHECK_DETAIL="set in your shell startup files"
   return 0
 }
 
@@ -901,8 +927,10 @@ check_jfrog_creds() {
 fix_jfrog_creds() {
   _usr="$(exported_value_in "${HOME}/.zshenv" "$JFROG_USR_VAR")" || _usr=""
   [ -n "$_usr" ] || { _usr="$(exported_value_in "${HOME}/.bash_profile" "$JFROG_USR_VAR")" || _usr=""; }
+  [ -n "$_usr" ] || { _usr="$(exported_value_in "${HOME}/.bashrc" "$JFROG_USR_VAR")" || _usr=""; }
   _psw="$(exported_value_in "${HOME}/.zshenv" "$JFROG_PSW_VAR")" || _psw=""
   [ -n "$_psw" ] || { _psw="$(exported_value_in "${HOME}/.bash_profile" "$JFROG_PSW_VAR")" || _psw=""; }
+  [ -n "$_psw" ] || { _psw="$(exported_value_in "${HOME}/.bashrc" "$JFROG_PSW_VAR")" || _psw=""; }
 
   if [ -z "$_usr" ] || [ -z "$_psw" ]; then
     # Prompting needs a controlling terminal; bail cleanly when headless (CI).
@@ -1113,19 +1141,19 @@ main() {
   # 7. GitHub CLI — installed and authenticated (gh auth login).
   run_check "GitHub CLI is installed and logged in" check_gh fix_gh required
 
-  # 8. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv and ~/.bash_profile from the
-  #    GitHub CLI credential (7), so it must come after it.
+  # 8. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv, ~/.bash_profile and ~/.bashrc
+  #    from the GitHub CLI credential (7), so it must come after it.
   run_check "GITHUB_ACCESS_TOKEN is exported in your shell profile" check_github_token fix_github_token required
 
-  # 9. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv and
-  #    ~/.bash_profile (created with `openssl rand -base64 32` when missing).
+  # 9. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv,
+  #    ~/.bash_profile and ~/.bashrc (created with `openssl rand -base64 32` when missing).
   run_check "LUV_TOKEN_CHECKSUM_SECRET is exported in your shell profile" check_checksum_secret fix_checksum_secret required
 
   # 10. Claude Code — installed, on PATH, up to date, and signed in.
   run_check "Claude Code is installed and logged in" check_claude fix_claude required
 
-  # 11. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv and
-  #     ~/.bash_profile. Entered by hand (paste a JFrog Identity Token).
+  # 11. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv,
+  #     ~/.bash_profile and ~/.bashrc. Entered by hand (paste a JFrog Identity Token).
   run_check "JFrog credentials are exported in your shell profile" check_jfrog_creds fix_jfrog_creds required
 
   # 12. lumivero-api repository — checked out in the current directory (or we are
