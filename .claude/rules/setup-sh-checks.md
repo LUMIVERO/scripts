@@ -69,7 +69,13 @@ The script is served from GitHub Pages and run as `curl -fsSL … | sh`:
   apt (Debian/Ubuntu), keyed off `OS_FAMILY`. Sets `CHECK_DETAIL`, returns
   non-zero when it can't. Use this for fixes whenever a distro package exists.
 - `ensure_line_in_file <file> <line>` — idempotent append (creates file if
-  missing, skips if line already present). Use for PATH/env lines in shell rc files.
+  missing, skips if line already present). The low-level primitive; prefer the
+  two helpers below for shell-startup lines so the right files are picked.
+- `persist_env_line <line>` — append a regular env-var export (`export VAR=…`)
+  to the always-sourced files: zsh `~/.zshenv` + bash `~/.bash_profile`.
+- `persist_path_line <line>` — append a PATH edit (`export PATH=…:$PATH`) to the
+  login files: zsh `~/.zprofile` + bash `~/.bash_profile`. Login (not `.zshenv`)
+  so a nested non-login shell doesn't re-prepend and duplicate the entry.
 - `CHECK_DETAIL` — the per-check context string. Reset to "" by the driver
   before each check and each fix re-check; just assign it.
 - `OS_FAMILY` — `macos` | `debian`, set by `check_os` (always check #1). Branch
@@ -85,14 +91,16 @@ The script is served from GitHub Pages and run as `curl -fsSL … | sh`:
 ## Gotchas (learned the hard way)
 
 - **`curl … | sh` can't mutate the parent shell.** A fix that puts a binary on
-  PATH must do *both*: (a) persist the `export PATH=…` line into shell rc files
+  PATH must do *both*: (a) persist the `export PATH=…` line via `persist_path_line`
   for future sessions, and (b) `export PATH=…` in the current process so the
-  re-check passes now. Do **not** use `source ~/.bashrc` — `source` is a bashism
-  and sourcing an rc file under non-interactive `sh` is unreliable.
-- **Support bash *and* zsh** when persisting env: append to both `~/.bashrc` and
-  `~/.zshrc` via `ensure_line_in_file`.
-- **Literal `$HOME`/`$PATH` in rc lines must stay unexpanded** so the interactive
-  shell expands them at startup. Single-quote the line and silence the resulting
+  re-check passes now. Do **not** use `source ~/.zprofile` — `source` is a bashism
+  and sourcing a startup file under non-interactive `sh` is unreliable.
+- **Put each export in the file its kind belongs in**, per shell convention:
+  regular env vars via `persist_env_line` (zsh `~/.zshenv`, bash `~/.bash_profile`),
+  PATH edits via `persist_path_line` (zsh `~/.zprofile`, bash `~/.bash_profile`).
+  Both helpers cover bash *and* zsh, so a fix run under either sets up the other.
+- **Literal `$HOME`/`$PATH` in startup lines must stay unexpanded** so the startup
+  shell expands them later. Single-quote the line and silence the resulting
   shellcheck warning with an inline `# shellcheck disable=SC2016` (the repo
   already uses inline directives, e.g. `SC1091`). Do not "fix" it to double quotes.
 - **Guard PATH dedup** before exporting: `case ":$PATH:" in *":$dir:"*) ;; *) … ;; esac`.

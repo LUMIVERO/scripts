@@ -446,6 +446,30 @@ ensure_line_in_file() {
   printf '%s\n' "$_line" >>"$_file"
 }
 
+# Where each kind of export belongs, by shell convention:
+#
+#   * A regular environment variable (export VAR=value) goes in an
+#     always-sourced file — zsh's ~/.zshenv (read by every zsh, login or not)
+#     and bash's ~/.bash_profile (login shell).
+#   * A PATH edit (export PATH=…:$PATH) goes in a login file — zsh's ~/.zprofile
+#     and bash's ~/.bash_profile — so a nested non-login shell doesn't re-source
+#     it and prepend the same entry twice.
+#
+# Both helpers append idempotently to both shells' files, so a fix run under
+# either shell sets up the other too.
+
+# Persist a regular environment-variable line: zsh ~/.zshenv + bash ~/.bash_profile.
+persist_env_line() {
+  ensure_line_in_file "${HOME}/.zshenv" "$1"
+  ensure_line_in_file "${HOME}/.bash_profile" "$1"
+}
+
+# Persist a PATH line: zsh ~/.zprofile + bash ~/.bash_profile.
+persist_path_line() {
+  ensure_line_in_file "${HOME}/.zprofile" "$1"
+  ensure_line_in_file "${HOME}/.bash_profile" "$1"
+}
+
 # Install a package by Homebrew formula (macOS) or apt package (Debian/Ubuntu).
 # Usage: install_pkg <brew-formula> <apt-package>
 # Sets CHECK_DETAIL and returns non-zero when it cannot install.
@@ -626,11 +650,10 @@ fix_devcontainer() {
     fi
   fi
 
-  # Literal $HOME/$PATH so the interactive shell expands them at startup, not now.
+  # Literal $HOME/$PATH so the startup shell expands them later, not now.
   # shellcheck disable=SC2016
   _line='export PATH="$HOME/.devcontainers/bin:$PATH"'
-  ensure_line_in_file "${HOME}/.bashrc" "$_line"
-  ensure_line_in_file "${HOME}/.zshrc" "$_line"
+  persist_path_line "$_line"
 
   case ":${PATH}:" in
     *":${DEVCONTAINER_BIN_DIR}:"*) ;;
@@ -781,37 +804,104 @@ fix_gh() {
   fi
 }
 
-# GITHUB_ACCESS_TOKEN wired into the shell profile. The Lumivero API tooling
-# reads this env var. Rather than write the secret to disk, we persist a command
-# that resolves it at shell startup from the GitHub CLI credential (established
-# by the GitHub CLI check above) — so the token itself never lands in a dotfile,
-# and a rotated `gh` login is picked up automatically by the next shell. Single
-# quotes keep the `$(…)` literal so the *interactive* shell evaluates it at
-# startup, not this script now (hence the SC2016 disable).
+# GITHUB_ACCESS_TOKEN wired into the shell profile — a regular environment
+# variable, so it lives in the always-sourced files (zsh ~/.zshenv, bash
+# ~/.bash_profile). The Lumivero API tooling reads this env var. Rather than
+# write the secret to disk, we persist a command that resolves it at shell
+# startup from the GitHub CLI credential (established by the GitHub CLI check
+# above) — so the token itself never lands in a dotfile, and a rotated `gh`
+# login is picked up automatically by the next shell. Single quotes keep the
+# `$(…)` literal so the startup shell evaluates it later, not this script now
+# (hence the SC2016 disable).
 # shellcheck disable=SC2016
 GITHUB_TOKEN_LINE='export GITHUB_ACCESS_TOKEN="$(gh auth token 2>/dev/null)"'
 
-# Satisfied when that exact line is present in both ~/.bashrc and ~/.zshrc. The
-# same fixed-string test ensure_line_in_file uses to append, so the two agree.
+# Satisfied when that exact line is present in both env-var files (~/.zshenv and
+# ~/.bash_profile). The same fixed-string test ensure_line_in_file uses to
+# append, so the two agree.
 check_github_token() {
-  for _rc in "${HOME}/.bashrc" "${HOME}/.zshrc"; do
+  for _rc in "${HOME}/.zshenv" "${HOME}/.bash_profile"; do
     if ! grep -qF "$GITHUB_TOKEN_LINE" "$_rc" 2>/dev/null; then
       CHECK_DETAIL="not set in ${_rc##*/}"
       return 1
     fi
   done
 
-  CHECK_DETAIL="set via 'gh auth token' in ~/.bashrc and ~/.zshrc"
+  CHECK_DETAIL="set via 'gh auth token' in ~/.zshenv and ~/.bash_profile"
   return 0
 }
 
-# Persist the resolver line into both shell profiles (idempotent append). It is
+# Persist the resolver line into the env-var files (idempotent append). It is
 # a fixed command, not a value, so there is nothing to update on a token change
 # and the secret is never written. The line works once the GitHub CLI is logged
 # in, which the required check above ensures runs first.
 fix_github_token() {
-  ensure_line_in_file "${HOME}/.bashrc" "$GITHUB_TOKEN_LINE"
-  ensure_line_in_file "${HOME}/.zshrc" "$GITHUB_TOKEN_LINE"
+  persist_env_line "$GITHUB_TOKEN_LINE"
+}
+
+# LUV_TOKEN_CHECKSUM_SECRET — a per-developer secret the Lumivero API tooling
+# uses to checksum tokens. A regular environment variable, so it lives in the
+# always-sourced files (zsh ~/.zshenv, bash ~/.bash_profile). Unlike
+# GITHUB_ACCESS_TOKEN (a fixed resolver command), this is a generated random
+# value persisted verbatim, so the check matches an `export
+# LUV_TOKEN_CHECKSUM_SECRET=` line by pattern (the value differs per machine)
+# rather than an exact line, and the fix generates the secret once and writes
+# the *same* value to both files — a split value would make bash and zsh
+# compute different checksums.
+CHECKSUM_SECRET_VAR="LUV_TOKEN_CHECKSUM_SECRET"
+
+# Print the value exported for CHECKSUM_SECRET_VAR in <file> (last export wins,
+# matching shell semantics), with one layer of surrounding quotes stripped.
+# Empty output when the variable is not exported there.
+checksum_secret_in() {
+  _file="$1"
+  _ln="$(grep -E "^[[:space:]]*export[[:space:]]+${CHECKSUM_SECRET_VAR}=" "$_file" 2>/dev/null | tail -n1)" || _ln=""
+  [ -n "$_ln" ] || return 1
+  _val="${_ln#*=}"
+  case "$_val" in
+    \"*\") _val="${_val#\"}"; _val="${_val%\"}" ;;
+    \'*\') _val="${_val#\'}"; _val="${_val%\'}" ;;
+  esac
+  printf '%s' "$_val"
+}
+
+# Satisfied when CHECKSUM_SECRET_VAR is exported (to a non-empty value) in both
+# env-var files (~/.zshenv and ~/.bash_profile).
+check_checksum_secret() {
+  for _rc in "${HOME}/.zshenv" "${HOME}/.bash_profile"; do
+    _cur="$(checksum_secret_in "$_rc")" || _cur=""
+    if [ -z "$_cur" ]; then
+      CHECK_DETAIL="not set in ${_rc##*/}"
+      return 1
+    fi
+  done
+  CHECK_DETAIL="set in ~/.zshenv and ~/.bash_profile"
+  return 0
+}
+
+# Persist the secret into the env-var files (idempotent append). Reuse a value
+# already present in either file so the two stay in sync; only generate a fresh
+# secret with `openssl rand -base64 32` when neither has one. The base64
+# alphabet (A-Za-z0-9+/=) carries no characters special inside double quotes.
+fix_checksum_secret() {
+  _val="$(checksum_secret_in "${HOME}/.zshenv")" || _val=""
+  if [ -z "$_val" ]; then
+    _val="$(checksum_secret_in "${HOME}/.bash_profile")" || _val=""
+  fi
+  if [ -z "$_val" ]; then
+    if ! have_cmd openssl; then
+      CHECK_DETAIL="openssl not available to generate the secret"
+      return 1
+    fi
+    _val="$(openssl rand -base64 32)" || _val=""
+    if [ -z "$_val" ]; then
+      CHECK_DETAIL="failed to generate a secret with 'openssl rand -base64 32'"
+      return 1
+    fi
+  fi
+
+  _line="export ${CHECKSUM_SECRET_VAR}=\"${_val}\""
+  persist_env_line "$_line"
 }
 
 # The official install.sh writes the native build to ~/.local/bin, so the
@@ -867,11 +957,10 @@ fix_claude() {
     fi
   fi
 
-  # Literal $HOME/$PATH so the interactive shell expands them at startup, not now.
+  # Literal $HOME/$PATH so the startup shell expands them later, not now.
   # shellcheck disable=SC2016
   _line='export PATH="$HOME/.local/bin:$PATH"'
-  ensure_line_in_file "${HOME}/.bashrc" "$_line"
-  ensure_line_in_file "${HOME}/.zshrc" "$_line"
+  persist_path_line "$_line"
 
   case ":${PATH}:" in
     *":${CLAUDE_BIN_DIR}:"*) ;;
@@ -1070,7 +1159,7 @@ main() {
   # Number of run_check calls below — paces the maze so the developer reaches
   # the centre on the final check. Keep in sync when adding/removing a check
   # (it only affects the animation; the checks themselves are unaffected).
-  MAZE_TOTAL=9
+  MAZE_TOTAL=10
   [ "$MAZE_TOTAL" -lt 1 ] && MAZE_TOTAL=1
 
   if [ "$MAZE_ON" = "1" ]; then
@@ -1118,15 +1207,19 @@ main() {
   # 6. GitHub CLI — installed and authenticated (gh auth login).
   run_check "GitHub CLI is installed and logged in" check_gh fix_gh required
 
-  # 7. GITHUB_ACCESS_TOKEN — exported in ~/.bashrc and ~/.zshrc from the GitHub
-  #    CLI credential (6), so it must come after it.
+  # 7. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv and ~/.bash_profile from the
+  #    GitHub CLI credential (6), so it must come after it.
   run_check "GITHUB_ACCESS_TOKEN is exported in your shell profile" check_github_token fix_github_token required
 
-  # 8. Claude Code — installed, on PATH, up to date, and signed in.
+  # 8. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv and
+  #    ~/.bash_profile (created with `openssl rand -base64 32` when missing).
+  run_check "LUV_TOKEN_CHECKSUM_SECRET is exported in your shell profile" check_checksum_secret fix_checksum_secret required
+
+  # 9. Claude Code — installed, on PATH, up to date, and signed in.
   run_check "Claude Code is installed and logged in" check_claude fix_claude required
 
-  # 9. lumivero-api repository — checked out in the current directory (or we are
-  #    already inside it). Depends on the GitHub CLI (6) for the private clone.
+  # 10. lumivero-api repository — checked out in the current directory (or we are
+  #     already inside it). Depends on the GitHub CLI (6) for the private clone.
   run_check "lumivero-api repository is checked out" check_repo fix_repo required
 
   print_summary
