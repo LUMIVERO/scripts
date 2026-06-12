@@ -781,6 +781,39 @@ fix_gh() {
   fi
 }
 
+# GITHUB_ACCESS_TOKEN wired into the shell profile. The Lumivero API tooling
+# reads this env var. Rather than write the secret to disk, we persist a command
+# that resolves it at shell startup from the GitHub CLI credential (established
+# by the GitHub CLI check above) — so the token itself never lands in a dotfile,
+# and a rotated `gh` login is picked up automatically by the next shell. Single
+# quotes keep the `$(…)` literal so the *interactive* shell evaluates it at
+# startup, not this script now (hence the SC2016 disable).
+# shellcheck disable=SC2016
+GITHUB_TOKEN_LINE='export GITHUB_ACCESS_TOKEN="$(gh auth token 2>/dev/null)"'
+
+# Satisfied when that exact line is present in both ~/.bashrc and ~/.zshrc. The
+# same fixed-string test ensure_line_in_file uses to append, so the two agree.
+check_github_token() {
+  for _rc in "${HOME}/.bashrc" "${HOME}/.zshrc"; do
+    if ! grep -qF "$GITHUB_TOKEN_LINE" "$_rc" 2>/dev/null; then
+      CHECK_DETAIL="not set in ${_rc##*/}"
+      return 1
+    fi
+  done
+
+  CHECK_DETAIL="set via 'gh auth token' in ~/.bashrc and ~/.zshrc"
+  return 0
+}
+
+# Persist the resolver line into both shell profiles (idempotent append). It is
+# a fixed command, not a value, so there is nothing to update on a token change
+# and the secret is never written. The line works once the GitHub CLI is logged
+# in, which the required check above ensures runs first.
+fix_github_token() {
+  ensure_line_in_file "${HOME}/.bashrc" "$GITHUB_TOKEN_LINE"
+  ensure_line_in_file "${HOME}/.zshrc" "$GITHUB_TOKEN_LINE"
+}
+
 # The official install.sh writes the native build to ~/.local/bin, so the
 # binary can exist there before that directory is on PATH (same shape as the
 # devcontainer CLI above).
@@ -1037,7 +1070,7 @@ main() {
   # Number of run_check calls below — paces the maze so the developer reaches
   # the centre on the final check. Keep in sync when adding/removing a check
   # (it only affects the animation; the checks themselves are unaffected).
-  MAZE_TOTAL=8
+  MAZE_TOTAL=9
   [ "$MAZE_TOTAL" -lt 1 ] && MAZE_TOTAL=1
 
   if [ "$MAZE_ON" = "1" ]; then
@@ -1085,10 +1118,14 @@ main() {
   # 6. GitHub CLI — installed and authenticated (gh auth login).
   run_check "GitHub CLI is installed and logged in" check_gh fix_gh required
 
-  # 7. Claude Code — installed, on PATH, up to date, and signed in.
+  # 7. GITHUB_ACCESS_TOKEN — exported in ~/.bashrc and ~/.zshrc from the GitHub
+  #    CLI credential (6), so it must come after it.
+  run_check "GITHUB_ACCESS_TOKEN is exported in your shell profile" check_github_token fix_github_token required
+
+  # 8. Claude Code — installed, on PATH, up to date, and signed in.
   run_check "Claude Code is installed and logged in" check_claude fix_claude required
 
-  # 8. lumivero-api repository — checked out in the current directory (or we are
+  # 9. lumivero-api repository — checked out in the current directory (or we are
   #    already inside it). Depends on the GitHub CLI (6) for the private clone.
   run_check "lumivero-api repository is checked out" check_repo fix_repo required
 
