@@ -520,6 +520,83 @@ fix_gh() {
   fi
 }
 
+# The official install.sh writes the native build to ~/.local/bin, so the
+# binary can exist there before that directory is on PATH (same shape as the
+# devcontainer CLI above).
+CLAUDE_BIN_DIR="${HOME}/.local/bin"
+
+# Claude Code (the `claude` CLI) — installed, on PATH, signed in, and current.
+# Login is probed non-interactively with `claude auth status --json`, which
+# reports `"loggedIn": true` for a usable session; the interactive
+# `claude auth login` lives in the fix, never here, so a check never blocks
+# waiting for a browser. When installed and signed in, the check also runs
+# `claude update` to keep the install current on every run — best-effort, so a
+# failed or already-current update never flips a healthy check to failing
+# ("up to date" is reported only when the update actually succeeds). A binary
+# present in the default install dir but not yet on PATH is reported separately
+# so the fix knows to repair PATH only.
+check_claude() {
+  if have_cmd claude; then
+    if claude auth status --json 2>/dev/null | grep -qE '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
+      if claude update >/dev/null 2>&1; then
+        _upd=", up to date"
+      else
+        _upd=""
+      fi
+      _ver="$(claude --version 2>/dev/null | cut -d' ' -f1)" || _ver=""
+      CHECK_DETAIL="${_ver:+v${_ver}, }logged in${_upd}"
+      return 0
+    fi
+    CHECK_DETAIL="installed but not logged in — run 'claude auth login'"
+    return 1
+  fi
+
+  if [ -x "${CLAUDE_BIN_DIR}/claude" ]; then
+    CHECK_DETAIL="installed but ${CLAUDE_BIN_DIR} is not on PATH"
+    return 1
+  fi
+
+  CHECK_DETAIL="not installed"
+  return 1
+}
+
+# Install the native build via the official script when missing, put
+# ~/.local/bin on PATH (persisted for future bash and zsh sessions and exported
+# into the current process so the immediate re-check finds the binary), then
+# sign in if needed. Updating is left to the post-fix re-check (check_claude
+# runs `claude update`), so the fix itself does not duplicate it.
+fix_claude() {
+  if [ ! -x "${CLAUDE_BIN_DIR}/claude" ] && ! have_cmd claude; then
+    if ! curl -fsSL https://claude.ai/install.sh | bash; then
+      CHECK_DETAIL="install script failed"
+      return 1
+    fi
+  fi
+
+  # Literal $HOME/$PATH so the interactive shell expands them at startup, not now.
+  # shellcheck disable=SC2016
+  _line='export PATH="$HOME/.local/bin:$PATH"'
+  ensure_line_in_file "${HOME}/.bashrc" "$_line"
+  ensure_line_in_file "${HOME}/.zshrc" "$_line"
+
+  case ":${PATH}:" in
+    *":${CLAUDE_BIN_DIR}:"*) ;;
+    *)
+      PATH="${CLAUDE_BIN_DIR}:${PATH}"
+      export PATH
+      ;;
+  esac
+
+  # Sign in if there is no usable session yet. claude auth login is interactive;
+  # read its prompts from the terminal, not the piped-in script.
+  if ! claude auth status --json 2>/dev/null | grep -qE '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
+    if ! claude auth login </dev/tty; then
+      CHECK_DETAIL="login failed — run 'claude auth login'"
+      return 1
+    fi
+  fi
+}
+
 # ----------------------------------------------------------------------------
 # Check driver.
 # ----------------------------------------------------------------------------
@@ -618,6 +695,9 @@ main() {
 
   # 6. GitHub CLI — installed and authenticated (gh auth login).
   run_check "GitHub CLI is installed and logged in" check_gh fix_gh required
+
+  # 7. Claude Code — installed, on PATH, up to date, and signed in.
+  run_check "Claude Code is installed and logged in" check_claude fix_claude required
 
   print_summary
 
