@@ -60,6 +60,7 @@ ICON_DONE="🚀"
 
 OS_FAMILY=""        # macos | debian — set by check_os, consumed by install_pkg
 CHECK_DETAIL=""     # short context a check may surface beside its result
+PROFILES_CHANGED="" # shell-startup files actually modified this run (space-separated)
 
 CHECK_TOTAL=0
 PASS_COUNT=0
@@ -196,6 +197,25 @@ print_summary() {
     printf '   %s%s %d failed%s' "$RED" "$ICON_FAIL" "$FAIL_COUNT" "$RESET"
   fi
   printf '\n'
+}
+
+# When a fix actually wrote to a shell-startup file this run, the exported
+# variables and PATH edits only reach *new* shells — the developer's current
+# session won't see them. Print a closing notice naming the files that changed
+# so they know to open a new terminal. No-op when nothing was modified.
+print_reload_notice() {
+  [ -n "$PROFILES_CHANGED" ] || return 0
+
+  _files=""
+  # shellcheck disable=SC2086  # deliberate word-splitting over the file list
+  for _f in $PROFILES_CHANGED; do
+    _files="${_files}${_files:+, }${_f##*/}"
+  done
+
+  printf '\n%s%s  Shell profile updated — open a new terminal%s\n' \
+    "$BOLD" "$ICON_INFO" "$RESET"
+  printf '%sChanges to %s apply to new shells only. Open a new terminal\n' "$DIM" "$_files"
+  printf 'session (or start a new shell) for them to take effect.%s\n' "$RESET"
 }
 
 # Ask a yes/no question. Reads from the controlling terminal so it works even
@@ -502,9 +522,20 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+# Remember that a shell-startup file was actually changed this run, so the run
+# can finish by telling the developer to open a new terminal for the change to
+# take effect. Dedups by path, so a file touched by several fixes is named once.
+record_profile_changed() {
+  case " ${PROFILES_CHANGED} " in
+    *" $1 "*) ;;                                                  # already recorded
+    *) PROFILES_CHANGED="${PROFILES_CHANGED}${PROFILES_CHANGED:+ }$1" ;;
+  esac
+}
+
 # Append a line to a file unless it is already present, creating the file if
 # missing. Idempotent, so it is safe to call on every run (e.g. to put a tool's
-# bin directory on PATH in a shell rc file).
+# bin directory on PATH in a shell rc file). Records the file as changed only
+# when a line is actually appended, so a no-op re-run triggers no reload notice.
 ensure_line_in_file() {
   _file="$1"
   _line="$2"
@@ -512,6 +543,7 @@ ensure_line_in_file() {
     return 0
   fi
   printf '%s\n' "$_line" >>"$_file"
+  record_profile_changed "$_file"
 }
 
 # Where each kind of export belongs, by shell convention:
@@ -1373,6 +1405,7 @@ main() {
   run_check "lumivero-api repository is checked out" check_repo fix_repo required
 
   print_summary
+  print_reload_notice
 
   if [ "$FAIL_COUNT" -gt 0 ]; then
     if [ "$GAME_ON" = "1" ]; then
