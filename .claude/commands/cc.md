@@ -9,18 +9,14 @@ Please commit with coauthor "Claude Code <bot+claudecode@lumivero.com>"
 
 **IMPORTANT:** Always run all git commands from the repository root directory (where `.git` folder exists). Use absolute paths or prefix commands with `cd <repo-root> &&` to ensure file paths resolve correctly. Never assume your current working directory is the repo root.
 
-1. Get the current branch name using `git branch --show-current`
-2. Extract the JIRA ID from the branch name prefix (e.g., `LA-123-some-description` → `LA-123`)
-3. Include all modified files in the commit, including any manually edited files (like data files)
-4. If there are unrelated changes that should be separate commits, ask the user first
-5. Generate a commit message in this format:
+1. Include all modified files in the commit, including any manually edited files (like data files)
+2. If there are unrelated changes that should be separate commits, ask the user first
+3. Generate a commit message in this format:
    ```text
-   LA-123: Brief description of changes
+   Brief description of changes
 
    - Detailed bullet point 1
    - Detailed bullet point 2
 
    Co-Authored-By: Claude Code <bot+claudecode@lumivero.com>
    ```
-
-If the branch name does not contain a JIRA ID prefix (e.g., `main`, `develop`), omit the JIRA ID from the commit message.
