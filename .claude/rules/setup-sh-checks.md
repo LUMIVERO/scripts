@@ -90,7 +90,10 @@ The script is served from GitHub Pages and run as `curl -fsSL … | sh`:
 - **`check_git`/`fix_git`** — minimal template in the `main()` comment block.
 - **`check_docker`/`fix_docker`** — installed *and* daemon-reachable; per-OS
   detail strings; Linux-only auto-install via official convenience script.
-- **`check_devcontainer`/`fix_devcontainer`** — installs a CLI and repairs PATH.
+- **`check_devcontainer`/`fix_devcontainer`** — installs a CLI and repairs PATH;
+  the check passes on the live PATH *or* on "installed at its known dir + PATH
+  line persisted" (see `path_line_persisted`), so a fixed install is not
+  re-fixed every run. `check_claude`/`fix_claude` follow the same shape.
 
 ## Gotchas (learned the hard way)
 
@@ -99,6 +102,16 @@ The script is served from GitHub Pages and run as `curl -fsSL … | sh`:
   for future sessions, and (b) `export PATH=…` in the current process so the
   re-check passes now. Do **not** use `source ~/.zprofile` — `source` is a bashism
   and sourcing a startup file under non-interactive `sh` is unreliable.
+- **A `check_` for a persisted tool must not depend on the *live* PATH only.**
+  Same root cause as above, but for the *check*: a later `curl … | sh` is a
+  fresh `sh` whose PATH comes from the parent shell, which may not have sourced
+  the file the fix wrote — so `have_cmd` stays false and the fix re-runs *every
+  run*. Mirror the env-var checks (which grep the dotfile, not the live env):
+  treat "binary at its known install dir **and** its PATH line present in the
+  startup files" as satisfied. Use `path_line_persisted "$THE_LINE"`, and share
+  one constant for the persisted line between the check and the fix (as
+  `DEVCONTAINER_PATH_LINE` / `CLAUDE_PATH_LINE` / `GITHUB_TOKEN_LINE` do) so the
+  grep and the append can never drift.
 - **Put each export in the file its kind belongs in**, per shell convention:
   regular env vars via `persist_env_line` (zsh `~/.zshenv`, bash `~/.bash_profile`),
   PATH edits via `persist_path_line` (zsh `~/.zprofile`, bash `~/.bash_profile`).

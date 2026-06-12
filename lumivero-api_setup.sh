@@ -277,6 +277,23 @@ persist_path_line() {
   ensure_line_in_file "${HOME}/.bash_profile" "$1"
 }
 
+# True when <line> (a PATH export persisted by persist_path_line) is already
+# present in both login files it writes — zsh ~/.zprofile and bash
+# ~/.bash_profile. This is the read counterpart of persist_path_line and the
+# same file-as-source-of-truth test the env-var checks use (check_github_token
+# et al. grep the dotfile rather than the live environment): once the line is
+# persisted, a fresh login shell puts the directory on PATH, so a check can
+# treat a tool installed at its known location as satisfied even when the
+# current `curl … | sh` process — which cannot see edits to the parent shell's
+# startup files — does not yet have it on PATH. Without this, such a check would
+# report "not on PATH" and re-run its fix on every invocation.
+path_line_persisted() {
+  for _rc in "${HOME}/.zprofile" "${HOME}/.bash_profile"; do
+    grep -qF "$1" "$_rc" 2>/dev/null || return 1
+  done
+  return 0
+}
+
 # Install a package by Homebrew formula (macOS) or apt package (Debian/Ubuntu).
 # Usage: install_pkg <brew-formula> <apt-package>
 # Sets CHECK_DETAIL and returns non-zero when it cannot install.
@@ -434,23 +451,40 @@ fix_docker() {
 # binary can therefore exist there before that directory is on PATH.
 DEVCONTAINER_BIN_DIR="${HOME}/.devcontainers/bin"
 
-# devcontainer CLI — installed and runnable from PATH. We treat "on PATH and
-# executes" as the bar; a binary that exists in the default install dir but is
-# not yet on PATH is reported separately so the fix knows to repair PATH only.
-check_devcontainer() {
-  if have_cmd devcontainer; then
-    _ver="$(devcontainer --version 2>/dev/null)" || _ver=""
-    CHECK_DETAIL="${_ver:-installed}"
-    return 0
-  fi
+# The PATH line the fix persists for the devcontainer CLI. A single constant so
+# the check (path_line_persisted) and the fix (persist_path_line) test and write
+# the exact same string — the same single-source-of-truth pattern as
+# GITHUB_TOKEN_LINE. Literal $HOME/$PATH so the startup shell expands them later,
+# not this script now (hence the SC2016 disable).
+# shellcheck disable=SC2016
+DEVCONTAINER_PATH_LINE='export PATH="$HOME/.devcontainers/bin:$PATH"'
 
-  if [ -x "${DEVCONTAINER_BIN_DIR}/devcontainer" ]; then
+# devcontainer CLI — installed and runnable. Satisfied when it is on the live
+# PATH, or when it is installed at its default location and that directory's
+# PATH line is already persisted to the startup files (a fresh login shell will
+# then have it on PATH — see path_line_persisted). The latter is why a fixed
+# install is not re-fixed on every run: this `curl … | sh` process cannot see
+# PATH edits made to the parent shell's startup files, so have_cmd alone would
+# keep reporting "not on PATH". A binary present but with no persisted PATH line
+# is reported separately so the fix knows to repair PATH only.
+check_devcontainer() {
+  _new_term=""
+  if have_cmd devcontainer; then
+    _dc="devcontainer"
+  elif [ -x "${DEVCONTAINER_BIN_DIR}/devcontainer" ] && path_line_persisted "$DEVCONTAINER_PATH_LINE"; then
+    _dc="${DEVCONTAINER_BIN_DIR}/devcontainer"
+    _new_term=" (open a new terminal to use it)"
+  elif [ -x "${DEVCONTAINER_BIN_DIR}/devcontainer" ]; then
     CHECK_DETAIL="installed but ${DEVCONTAINER_BIN_DIR} is not on PATH"
+    return 1
+  else
+    CHECK_DETAIL="not installed"
     return 1
   fi
 
-  CHECK_DETAIL="not installed"
-  return 1
+  _ver="$("$_dc" --version 2>/dev/null)" || _ver=""
+  CHECK_DETAIL="${_ver:-installed}${_new_term}"
+  return 0
 }
 
 # Install the devcontainer CLI via the official script when missing, then put
@@ -464,10 +498,7 @@ fix_devcontainer() {
     fi
   fi
 
-  # Literal $HOME/$PATH so the startup shell expands them later, not now.
-  # shellcheck disable=SC2016
-  _line='export PATH="$HOME/.devcontainers/bin:$PATH"'
-  persist_path_line "$_line"
+  persist_path_line "$DEVCONTAINER_PATH_LINE"
 
   case ":${PATH}:" in
     *":${DEVCONTAINER_BIN_DIR}:"*) ;;
@@ -730,38 +761,54 @@ fix_checksum_secret() {
 # devcontainer CLI above).
 CLAUDE_BIN_DIR="${HOME}/.local/bin"
 
-# Claude Code (the `claude` CLI) — installed, on PATH, signed in, and current.
-# Login is probed non-interactively with `claude auth status --json`, which
-# reports `"loggedIn": true` for a usable session; the interactive
-# `claude auth login` lives in the fix, never here, so a check never blocks
-# waiting for a browser. When installed and signed in, the check also runs
-# `claude update` to keep the install current on every run — best-effort, so a
-# failed or already-current update never flips a healthy check to failing
-# ("up to date" is reported only when the update actually succeeds). A binary
-# present in the default install dir but not yet on PATH is reported separately
-# so the fix knows to repair PATH only.
-check_claude() {
-  if have_cmd claude; then
-    if claude auth status --json 2>/dev/null | grep -qE '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
-      if claude update >/dev/null 2>&1; then
-        _upd=", up to date"
-      else
-        _upd=""
-      fi
-      _ver="$(claude --version 2>/dev/null | cut -d' ' -f1)" || _ver=""
-      CHECK_DETAIL="${_ver:+v${_ver}, }logged in${_upd}"
-      return 0
-    fi
-    CHECK_DETAIL="installed but not logged in — run 'claude auth login'"
-    return 1
-  fi
+# The PATH line the fix persists for Claude Code — the single source of truth
+# shared by the check (path_line_persisted) and the fix (persist_path_line), as
+# with DEVCONTAINER_PATH_LINE above. Literal $HOME/$PATH for the startup shell
+# (SC2016).
+# shellcheck disable=SC2016
+CLAUDE_PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
 
-  if [ -x "${CLAUDE_BIN_DIR}/claude" ]; then
+# Claude Code (the `claude` CLI) — installed, reachable, signed in, and current.
+# It is "reachable" when on the live PATH, or installed at its default location
+# with its PATH line already persisted (a fresh login shell will then find it —
+# see path_line_persisted); that second case is what stops a fixed install from
+# being re-fixed every run, since this `curl … | sh` process can't see PATH
+# edits to the parent shell's startup files. The binary is resolved once (by its
+# absolute path when only persisted, else by name) and the same checks run on
+# it: login is probed non-interactively with `claude auth status --json`, which
+# reports `"loggedIn": true` for a usable session — the interactive
+# `claude auth login` lives in the fix, never here, so a check never blocks
+# waiting for a browser. When signed in, the check also runs `claude update` to
+# keep the install current — best-effort, so a failed or already-current update
+# never flips a healthy check to failing ("up to date" is reported only when the
+# update actually succeeds). A binary present with no persisted PATH line is
+# reported separately so the fix knows to repair PATH only.
+check_claude() {
+  _new_term=""
+  if have_cmd claude; then
+    _claude="claude"
+  elif [ -x "${CLAUDE_BIN_DIR}/claude" ] && path_line_persisted "$CLAUDE_PATH_LINE"; then
+    _claude="${CLAUDE_BIN_DIR}/claude"
+    _new_term=" (open a new terminal to use it)"
+  elif [ -x "${CLAUDE_BIN_DIR}/claude" ]; then
     CHECK_DETAIL="installed but ${CLAUDE_BIN_DIR} is not on PATH"
     return 1
+  else
+    CHECK_DETAIL="not installed"
+    return 1
   fi
 
-  CHECK_DETAIL="not installed"
+  if "$_claude" auth status --json 2>/dev/null | grep -qE '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
+    if "$_claude" update >/dev/null 2>&1; then
+      _upd=", up to date"
+    else
+      _upd=""
+    fi
+    _ver="$("$_claude" --version 2>/dev/null | cut -d' ' -f1)" || _ver=""
+    CHECK_DETAIL="${_ver:+v${_ver}, }logged in${_upd}${_new_term}"
+    return 0
+  fi
+  CHECK_DETAIL="installed but not logged in — run 'claude auth login'"
   return 1
 }
 
@@ -778,10 +825,7 @@ fix_claude() {
     fi
   fi
 
-  # Literal $HOME/$PATH so the startup shell expands them later, not now.
-  # shellcheck disable=SC2016
-  _line='export PATH="$HOME/.local/bin:$PATH"'
-  persist_path_line "$_line"
+  persist_path_line "$CLAUDE_PATH_LINE"
 
   case ":${PATH}:" in
     *":${CLAUDE_BIN_DIR}:"*) ;;
