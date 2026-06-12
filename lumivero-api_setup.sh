@@ -850,12 +850,13 @@ fix_github_token() {
 # compute different checksums.
 CHECKSUM_SECRET_VAR="LUV_TOKEN_CHECKSUM_SECRET"
 
-# Print the value exported for CHECKSUM_SECRET_VAR in <file> (last export wins,
-# matching shell semantics), with one layer of surrounding quotes stripped.
-# Empty output when the variable is not exported there.
-checksum_secret_in() {
+# Print the value exported for <var> in <file> (last export wins, matching shell
+# semantics), with one layer of surrounding quotes stripped. Empty output (and a
+# non-zero return) when the variable is not exported there.
+exported_value_in() {
   _file="$1"
-  _ln="$(grep -E "^[[:space:]]*export[[:space:]]+${CHECKSUM_SECRET_VAR}=" "$_file" 2>/dev/null | tail -n1)" || _ln=""
+  _var="$2"
+  _ln="$(grep -E "^[[:space:]]*export[[:space:]]+${_var}=" "$_file" 2>/dev/null | tail -n1)" || _ln=""
   [ -n "$_ln" ] || return 1
   _val="${_ln#*=}"
   case "$_val" in
@@ -863,6 +864,12 @@ checksum_secret_in() {
     \'*\') _val="${_val#\'}"; _val="${_val%\'}" ;;
   esac
   printf '%s' "$_val"
+}
+
+# Value of CHECKSUM_SECRET_VAR exported in <file> — a thin wrapper over the
+# generic helper above, kept for readability at its call sites.
+checksum_secret_in() {
+  exported_value_in "$1" "$CHECKSUM_SECRET_VAR"
 }
 
 # Satisfied when CHECKSUM_SECRET_VAR is exported (to a non-empty value) in both
@@ -978,6 +985,83 @@ fix_claude() {
       return 1
     fi
   fi
+}
+
+# JFrog credentials the Lumivero API tooling reads as JFROG_CREDENTIALS_USR /
+# JFROG_CREDENTIALS_PSW — the Jenkins-style binding of a single username/token
+# credential (USR = JFrog username, PSW = a JFrog Identity Token). Both are
+# regular environment variables, so they live in the always-sourced files (zsh
+# ~/.zshenv, bash ~/.bash_profile), persisted verbatim like
+# LUV_TOKEN_CHECKSUM_SECRET: the values are hand-entered secrets with no source
+# to derive them from, so the resolver-line trick used for GITHUB_ACCESS_TOKEN
+# does not apply. The developer creates the token in the JFrog UI and pastes it.
+JFROG_USR_VAR="JFROG_CREDENTIALS_USR"
+JFROG_PSW_VAR="JFROG_CREDENTIALS_PSW"
+JFROG_URL="https://lumivero.jfrog.io/"
+
+# Satisfied when both credential vars are exported (to non-empty values) in both
+# env-var files (~/.zshenv and ~/.bash_profile).
+check_jfrog_creds() {
+  for _rc in "${HOME}/.zshenv" "${HOME}/.bash_profile"; do
+    for _var in "$JFROG_USR_VAR" "$JFROG_PSW_VAR"; do
+      _cur="$(exported_value_in "$_rc" "$_var")" || _cur=""
+      if [ -z "$_cur" ]; then
+        CHECK_DETAIL="${_var} not set in ${_rc##*/}"
+        return 1
+      fi
+    done
+  done
+  CHECK_DETAIL="set in ~/.zshenv and ~/.bash_profile"
+  return 0
+}
+
+# Prompt for the credentials and persist both verbatim to the env-var files.
+# Reuse a value already present in either file so re-runs don't clobber it and
+# the two files stay in sync; only prompt for what's missing. Prompts read from
+# /dev/tty (the script itself occupies stdin under curl … | sh); the token is
+# read with echo off so a pasted secret is not shown on screen.
+fix_jfrog_creds() {
+  _usr="$(exported_value_in "${HOME}/.zshenv" "$JFROG_USR_VAR")" || _usr=""
+  [ -n "$_usr" ] || { _usr="$(exported_value_in "${HOME}/.bash_profile" "$JFROG_USR_VAR")" || _usr=""; }
+  _psw="$(exported_value_in "${HOME}/.zshenv" "$JFROG_PSW_VAR")" || _psw=""
+  [ -n "$_psw" ] || { _psw="$(exported_value_in "${HOME}/.bash_profile" "$JFROG_PSW_VAR")" || _psw=""; }
+
+  if [ -z "$_usr" ] || [ -z "$_psw" ]; then
+    # Prompting needs a controlling terminal; bail cleanly when headless (CI).
+    if ! { true >/dev/tty; } 2>/dev/null; then
+      CHECK_DETAIL="no terminal to enter credentials; set ${JFROG_USR_VAR} and ${JFROG_PSW_VAR} manually"
+      return 1
+    fi
+    printf '   %s  Create a JFrog Identity Token at %s (Edit Profile), then paste it below.\n' \
+      "$ICON_INFO" "$JFROG_URL" >/dev/tty
+  fi
+
+  if [ -z "$_usr" ]; then
+    printf '%s   %s JFrog username: %s' "$YELLOW" "$ICON_INFO" "$RESET" >/dev/tty
+    read -r _usr </dev/tty 2>/dev/null || _usr=""
+    if [ -z "$_usr" ]; then
+      CHECK_DETAIL="no JFrog username entered"
+      return 1
+    fi
+  fi
+
+  if [ -z "$_psw" ]; then
+    printf '%s   %s JFrog identity token: %s' "$YELLOW" "$ICON_INFO" "$RESET" >/dev/tty
+    stty -echo </dev/tty 2>/dev/null || true
+    read -r _psw </dev/tty 2>/dev/null || _psw=""
+    stty echo </dev/tty 2>/dev/null || true
+    printf '\n' >/dev/tty 2>/dev/null
+    if [ -z "$_psw" ]; then
+      CHECK_DETAIL="no JFrog identity token entered"
+      return 1
+    fi
+  fi
+
+  # Write the same value to both files so bash and zsh agree. The token alphabet
+  # carries no characters special inside double quotes (same assumption as the
+  # base64 checksum secret above).
+  persist_env_line "export ${JFROG_USR_VAR}=\"${_usr}\""
+  persist_env_line "export ${JFROG_PSW_VAR}=\"${_psw}\""
 }
 
 # The Lumivero API repository and where it lives on GitHub. The checkout is
@@ -1159,7 +1243,7 @@ main() {
   # Number of run_check calls below — paces the maze so the developer reaches
   # the centre on the final check. Keep in sync when adding/removing a check
   # (it only affects the animation; the checks themselves are unaffected).
-  MAZE_TOTAL=10
+  MAZE_TOTAL=11
   [ "$MAZE_TOTAL" -lt 1 ] && MAZE_TOTAL=1
 
   if [ "$MAZE_ON" = "1" ]; then
@@ -1218,7 +1302,11 @@ main() {
   # 9. Claude Code — installed, on PATH, up to date, and signed in.
   run_check "Claude Code is installed and logged in" check_claude fix_claude required
 
-  # 10. lumivero-api repository — checked out in the current directory (or we are
+  # 10. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv and
+  #     ~/.bash_profile. Entered by hand (paste a JFrog Identity Token).
+  run_check "JFrog credentials are exported in your shell profile" check_jfrog_creds fix_jfrog_creds required
+
+  # 11. lumivero-api repository — checked out in the current directory (or we are
   #     already inside it). Depends on the GitHub CLI (6) for the private clone.
   run_check "lumivero-api repository is checked out" check_repo fix_repo required
 
