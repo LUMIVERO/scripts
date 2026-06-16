@@ -718,6 +718,67 @@ install_sops_linux() {
   rm -f "$_tmp"
 }
 
+# Visual Studio Code — the editor the Dev Containers workflow runs from. It is
+# auto-installed only on Linux (Debian/Ubuntu), from Microsoft's official apt
+# repository; on macOS it is not installed for you (get it from
+# https://code.visualstudio.com/ or `brew install --cask visual-studio-code`).
+# Detected by the `code` CLI on PATH or, on macOS, the installed .app bundle —
+# VS Code on macOS ships the `code` command only after you run "Shell Command:
+# Install 'code' command in PATH", so the app can be present without it.
+check_vscode() {
+  if have_cmd code; then
+    _ver="$(code --version 2>/dev/null | head -n1)" || _ver=""
+    CHECK_DETAIL="${_ver:+v${_ver}, }installed"
+    return 0
+  fi
+
+  if [ "$OS_FAMILY" = "macos" ]; then
+    if [ -d "/Applications/Visual Studio Code.app" ] || [ -d "${HOME}/Applications/Visual Studio Code.app" ]; then
+      CHECK_DETAIL="app installed (the 'code' CLI is not on PATH)"
+      return 0
+    fi
+    CHECK_DETAIL="not installed — get it from https://code.visualstudio.com/ or 'brew install --cask visual-studio-code'"
+    return 1
+  fi
+
+  CHECK_DETAIL="not installed"
+  return 1
+}
+
+# Install VS Code on Debian/Ubuntu from Microsoft's official apt repository
+# (https://code.visualstudio.com/docs/setup/linux) — the same keyring + sources
+# list shape as the GitHub CLI fix above. On macOS there is no automated install:
+# the developer is pointed at the download (or Homebrew cask).
+fix_vscode() {
+  if [ "$OS_FAMILY" != "debian" ]; then
+    CHECK_DETAIL="install VS Code from https://code.visualstudio.com/ (or 'brew install --cask visual-studio-code')"
+    return 1
+  fi
+
+  # gpg dearmors the signing key, wget fetches it — install either if missing.
+  have_cmd gpg || run_root apt-get install -y gpg || {
+    CHECK_DETAIL="could not install gpg (needed to dearmor the VS Code signing key)"
+    return 1
+  }
+  have_cmd wget || run_root apt-get install -y wget || {
+    CHECK_DETAIL="could not install wget (needed to fetch the VS Code signing key)"
+    return 1
+  }
+
+  run_root mkdir -p -m 755 /etc/apt/keyrings || return 1
+  wget -qO- https://packages.microsoft.com/keys/microsoft.asc \
+    | gpg --dearmor \
+    | run_root tee /etc/apt/keyrings/packages.microsoft.gpg >/dev/null || return 1
+  run_root chmod go+r /etc/apt/keyrings/packages.microsoft.gpg || return 1
+
+  _arch="$(dpkg --print-architecture)"
+  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main\n' "$_arch" \
+    | run_root tee /etc/apt/sources.list.d/vscode.list >/dev/null || return 1
+
+  run_root apt-get update || return 1
+  run_root apt-get install -y code || return 1
+}
+
 # The Azure Container Registry every developer needs pull/push access to.
 ACR_NAME="uluruscacr"
 
@@ -1209,7 +1270,7 @@ select_repo_branch() {
 }
 
 # Clone the repository into the current directory. Prefer the GitHub CLI when it
-# is present (it carries the auth from check #6, so it works for the private org
+# is present (it carries the auth from check #8, so it works for the private org
 # repo without a separate git credential helper) and fall back to git over HTTPS.
 # curl … | sh cannot change the caller's shell directory, so we can't honour the
 # `cd lumivero-api` step ourselves — we point the developer at it instead. Branch
@@ -1363,30 +1424,34 @@ main() {
   #    set so a multi-tool miss is fixed in a single package-manager command.
   run_check "Command-line tools installed (git, jq, make, sops)" check_cli_tools fix_cli_tools required
 
-  # 6. Azure + ACR login — signed in and able to reach the uluruscacr registry.
+  # 6. Visual Studio Code — the editor the Dev Containers workflow runs from.
+  #    Auto-installed on Linux only; optional, so a macOS/WSL miss just warns.
+  run_check "Visual Studio Code is installed" check_vscode fix_vscode optional
+
+  # 7. Azure + ACR login — signed in and able to reach the uluruscacr registry.
   #    Depends on the Azure CLI (4) and Docker (2), so it comes last.
   run_check "Logged in to Azure and ACR uluruscacr accessible" check_acr fix_acr required
 
-  # 7. GitHub CLI — installed and authenticated (gh auth login).
+  # 8. GitHub CLI — installed and authenticated (gh auth login).
   run_check "GitHub CLI is installed and logged in" check_gh fix_gh required
 
-  # 8. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv, ~/.bash_profile and ~/.bashrc
-  #    from the GitHub CLI credential (7), so it must come after it.
+  # 9. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv, ~/.bash_profile and ~/.bashrc
+  #    from the GitHub CLI credential (8), so it must come after it.
   run_check "GITHUB_ACCESS_TOKEN is exported in your shell profile" check_github_token fix_github_token required
 
-  # 9. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv,
-  #    ~/.bash_profile and ~/.bashrc (created with `openssl rand -base64 32` when missing).
+  # 10. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv,
+  #     ~/.bash_profile and ~/.bashrc (created with `openssl rand -base64 32` when missing).
   run_check "LUV_TOKEN_CHECKSUM_SECRET is exported in your shell profile" check_checksum_secret fix_checksum_secret required
 
-  # 10. Claude Code — installed, on PATH, up to date, and signed in.
+  # 11. Claude Code — installed, on PATH, up to date, and signed in.
   run_check "Claude Code is installed and logged in" check_claude fix_claude required
 
-  # 11. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv,
+  # 12. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv,
   #     ~/.bash_profile and ~/.bashrc. Entered by hand (paste a JFrog Identity Token).
   run_check "JFrog credentials are exported in your shell profile" check_jfrog_creds fix_jfrog_creds required
 
-  # 12. lumivero-api repository — checked out in the current directory (or we are
-  #     already inside it). Depends on the GitHub CLI (7) for the private clone.
+  # 13. lumivero-api repository — checked out in the current directory (or we are
+  #     already inside it). Depends on the GitHub CLI (8) for the private clone.
   run_check "lumivero-api repository is checked out" check_repo fix_repo required
 
   # With the repo in place (already present or just cloned), offer a branch to
