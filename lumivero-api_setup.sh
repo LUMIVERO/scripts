@@ -577,77 +577,145 @@ fix_az() {
   esac
 }
 
-# make — the build tool the lumivero-api workflow is driven through. It only
-# needs to be on PATH and runnable; `make --version` doubles as the probe and
-# supplies the version string shown beside the result.
-check_make() {
-  if ! have_cmd make; then
-    CHECK_DETAIL="not installed"
+# The plain command-line tools the workflow needs — each only has to be on PATH.
+# They are checked and installed as one set, so when several are missing they are
+# installed in a single package-manager command (one `brew install …` on macOS,
+# one `apt-get install …` on Debian/Ubuntu) rather than one invocation per tool.
+#
+# Command name doubles as the Homebrew formula and the apt package for every tool
+# here except sops, which has no usable apt package on Ubuntu/Debian (it ships
+# only as a GitHub-release binary) — so on Linux sops is installed from that
+# release instead (see install_sops_linux); on macOS `brew install sops` works.
+CLI_TOOLS="git jq make sops"
+
+# Satisfied when every tool in CLI_TOOLS is on PATH. CHECK_DETAIL summarises the
+# set — the tools present, or which are missing — so this one line stands in for
+# the per-tool lines it replaces.
+check_cli_tools() {
+  _present=""
+  _missing=""
+  # shellcheck disable=SC2086  # CLI_TOOLS is a deliberate space-separated list
+  for _t in $CLI_TOOLS; do
+    if have_cmd "$_t"; then
+      _present="${_present}${_present:+, }${_t}"
+    else
+      _missing="${_missing}${_missing:+, }${_t}"
+    fi
+  done
+
+  if [ -n "$_missing" ]; then
+    CHECK_DETAIL="missing: ${_missing}"
     return 1
   fi
-  _ver="$(make --version 2>/dev/null | head -n1)" || _ver=""
-  CHECK_DETAIL="${_ver:-installed}"
+  CHECK_DETAIL="${_present}"
   return 0
 }
 
-# Install make from the distro package: `apt-get update && apt-get install -y
-# make` on Debian/Ubuntu, Homebrew on macOS — install_pkg picks the right one
-# per OS_FAMILY.
-fix_make() {
-  install_pkg make make
+# Install whatever tools in CLI_TOOLS are missing, in as few commands as
+# possible: one `brew install` (macOS) or one `apt-get install` (Debian/Ubuntu)
+# covering every missing tool at once. sops on Linux is the exception — it has no
+# usable apt package, so it is fetched from its official release binary by
+# install_sops_linux. Sets CHECK_DETAIL and returns non-zero when it cannot
+# install; the driver re-runs check_cli_tools afterwards to confirm.
+fix_cli_tools() {
+  _missing=""
+  # shellcheck disable=SC2086  # CLI_TOOLS is a deliberate space-separated list
+  for _t in $CLI_TOOLS; do
+    have_cmd "$_t" || _missing="${_missing}${_missing:+ }${_t}"
+  done
+  [ -n "$_missing" ] || return 0
+
+  case "$OS_FAMILY" in
+    macos)
+      if ! have_cmd brew; then
+        CHECK_DETAIL="Homebrew required; install it from https://brew.sh"
+        return 1
+      fi
+      # Command name == Homebrew formula for every tool in the set.
+      # shellcheck disable=SC2086  # install every missing formula in one command
+      brew install $_missing || return 1
+      ;;
+    debian)
+      # Split the miss into apt packages (command name == package name) and sops,
+      # which has no apt package and is installed from its release binary instead.
+      _apt=""
+      _need_sops=""
+      for _t in $_missing; do
+        if [ "$_t" = "sops" ]; then
+          _need_sops=1
+        else
+          _apt="${_apt}${_apt:+ }${_t}"
+        fi
+      done
+
+      # One apt-get install covering every apt-installable tool that is missing.
+      if [ -n "$_apt" ]; then
+        if have_cmd sudo; then
+          # shellcheck disable=SC2086  # install every missing package in one command
+          sudo apt-get update && sudo apt-get install -y $_apt || return 1
+        else
+          # shellcheck disable=SC2086  # install every missing package in one command
+          apt-get update && apt-get install -y $_apt || return 1
+        fi
+      fi
+
+      if [ -n "$_need_sops" ]; then
+        install_sops_linux || return 1
+      fi
+      ;;
+    *)
+      CHECK_DETAIL="no automated installer for this environment"
+      return 1
+      ;;
+  esac
 }
 
-# git — the version-control tool. Needed to clone the repository and select a
-# branch below, and used throughout the workflow. On PATH and runnable is enough;
-# `git --version` doubles as the probe and supplies the version string.
-check_git() {
-  if ! have_cmd git; then
-    CHECK_DETAIL="not installed"
+# Install sops on Debian/Ubuntu from its official GitHub release binary, because
+# there is no usable sops apt package there. The latest version is read from the
+# /releases/latest redirect (no API token and no JSON parsing — so this does not
+# depend on jq, which may itself be installing in the same pass), the matching
+# Linux binary for the machine architecture is downloaded, and it is placed on
+# PATH at /usr/local/bin. Sets CHECK_DETAIL and returns non-zero on any failure.
+install_sops_linux() {
+  _arch="$(dpkg --print-architecture 2>/dev/null)" || _arch=""
+  case "$_arch" in
+    amd64 | arm64) ;;
+    *)
+      CHECK_DETAIL="no sops release binary for architecture '${_arch:-unknown}'"
+      return 1
+      ;;
+  esac
+
+  # /releases/latest redirects to /releases/tag/<version>; the version is the
+  # last path segment of the resolved URL.
+  _url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/getsops/sops/releases/latest 2>/dev/null)" || _url=""
+  _ver="${_url##*/}"
+  case "$_ver" in
+    v[0-9]*) ;;
+    *)
+      CHECK_DETAIL="could not determine the latest sops release"
+      return 1
+      ;;
+  esac
+
+  _dl="https://github.com/getsops/sops/releases/download/${_ver}/sops-${_ver}.linux.${_arch}"
+  _tmp="$(mktemp 2>/dev/null)" || {
+    CHECK_DETAIL="could not create a temporary file for the sops download"
+    return 1
+  }
+
+  if ! curl -fsSL "$_dl" -o "$_tmp"; then
+    rm -f "$_tmp"
+    CHECK_DETAIL="failed to download sops ${_ver} from ${_dl}"
     return 1
   fi
-  _ver="$(git --version 2>/dev/null)" || _ver=""
-  CHECK_DETAIL="${_ver:-installed}"
-  return 0
-}
 
-# Install git from the distro package (apt) or Homebrew (macOS) via install_pkg.
-fix_git() {
-  install_pkg git git
-}
-
-# jq — the JSON processor the Lumivero API tooling shells out to. On PATH and
-# runnable is enough; `jq --version` (prints e.g. "jq-1.7.1") is the probe.
-check_jq() {
-  if ! have_cmd jq; then
-    CHECK_DETAIL="not installed"
+  if ! run_root install -m 0755 "$_tmp" /usr/local/bin/sops; then
+    rm -f "$_tmp"
+    CHECK_DETAIL="failed to install sops to /usr/local/bin (need write access)"
     return 1
   fi
-  _ver="$(jq --version 2>/dev/null)" || _ver=""
-  CHECK_DETAIL="${_ver:-installed}"
-  return 0
-}
-
-# Install jq from the distro package (apt) or Homebrew (macOS) via install_pkg.
-fix_jq() {
-  install_pkg jq jq
-}
-
-# sops — Mozilla SOPS, used to decrypt the API's secret files. On PATH and
-# runnable is enough; `sops --version` is the probe (newer builds append an
-# update-check line, so keep only the first).
-check_sops() {
-  if ! have_cmd sops; then
-    CHECK_DETAIL="not installed"
-    return 1
-  fi
-  _ver="$(sops --version 2>/dev/null | head -n1)" || _ver=""
-  CHECK_DETAIL="${_ver:-installed}"
-  return 0
-}
-
-# Install sops from the distro package (apt) or Homebrew (macOS) via install_pkg.
-fix_sops() {
-  install_pkg sops sops
+  rm -f "$_tmp"
 }
 
 # The Azure Container Registry every developer needs pull/push access to.
@@ -1291,42 +1359,34 @@ main() {
   # 4. Azure CLI — installed and runnable.
   run_check "Azure CLI is installed and working" check_az fix_az required
 
-  # 5. make — the build tool the lumivero-api workflow is driven through.
-  run_check "make is installed" check_make fix_make required
+  # 5. Command-line tools — git, jq, make and sops, checked and installed as one
+  #    set so a multi-tool miss is fixed in a single package-manager command.
+  run_check "Command-line tools installed (git, jq, make, sops)" check_cli_tools fix_cli_tools required
 
-  # 6. git — the version-control tool (needed by the repo checkout below, #15).
-  run_check "git is installed" check_git fix_git required
-
-  # 7. jq — the JSON processor the API tooling shells out to.
-  run_check "jq is installed" check_jq fix_jq required
-
-  # 8. sops — Mozilla SOPS, used to decrypt the API's secret files.
-  run_check "sops is installed" check_sops fix_sops required
-
-  # 9. Azure + ACR login — signed in and able to reach the uluruscacr registry.
+  # 6. Azure + ACR login — signed in and able to reach the uluruscacr registry.
   #    Depends on the Azure CLI (4) and Docker (2), so it comes last.
   run_check "Logged in to Azure and ACR uluruscacr accessible" check_acr fix_acr required
 
-  # 10. GitHub CLI — installed and authenticated (gh auth login).
+  # 7. GitHub CLI — installed and authenticated (gh auth login).
   run_check "GitHub CLI is installed and logged in" check_gh fix_gh required
 
-  # 11. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv, ~/.bash_profile and ~/.bashrc
-  #     from the GitHub CLI credential (10), so it must come after it.
+  # 8. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv, ~/.bash_profile and ~/.bashrc
+  #    from the GitHub CLI credential (7), so it must come after it.
   run_check "GITHUB_ACCESS_TOKEN is exported in your shell profile" check_github_token fix_github_token required
 
-  # 12. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv,
-  #     ~/.bash_profile and ~/.bashrc (created with `openssl rand -base64 32` when missing).
+  # 9. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv,
+  #    ~/.bash_profile and ~/.bashrc (created with `openssl rand -base64 32` when missing).
   run_check "LUV_TOKEN_CHECKSUM_SECRET is exported in your shell profile" check_checksum_secret fix_checksum_secret required
 
-  # 13. Claude Code — installed, on PATH, up to date, and signed in.
+  # 10. Claude Code — installed, on PATH, up to date, and signed in.
   run_check "Claude Code is installed and logged in" check_claude fix_claude required
 
-  # 14. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv,
+  # 11. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv,
   #     ~/.bash_profile and ~/.bashrc. Entered by hand (paste a JFrog Identity Token).
   run_check "JFrog credentials are exported in your shell profile" check_jfrog_creds fix_jfrog_creds required
 
-  # 15. lumivero-api repository — checked out in the current directory (or we are
-  #     already inside it). Depends on the GitHub CLI (10) for the private clone.
+  # 12. lumivero-api repository — checked out in the current directory (or we are
+  #     already inside it). Depends on the GitHub CLI (7) for the private clone.
   run_check "lumivero-api repository is checked out" check_repo fix_repo required
 
   # With the repo in place (already present or just cloned), offer a branch to
