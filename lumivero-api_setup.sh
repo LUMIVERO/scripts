@@ -779,6 +779,36 @@ fix_vscode() {
   run_root apt-get install -y code || return 1
 }
 
+# DONT_PROMPT_WSL_INSTALL silences the prompt VS Code shows every time `code` is
+# launched from a WSL shell ("install Visual Studio Code in Windows and uninstall
+# the Linux version in WSL"). VS Code only tests that the variable is *defined*,
+# so any value works; we export 1. It is a regular environment variable, so it
+# lives in the same shell startup files as the others (zsh ~/.zshenv; bash
+# ~/.bash_profile and ~/.bashrc). It is meaningful only under WSL — main()
+# registers this check only there (mirroring is_wsl), so the check/fix below never
+# need to re-test the platform.
+WSL_CODE_PROMPT_LINE='export DONT_PROMPT_WSL_INSTALL=1'
+
+# Satisfied when that exact line is present in every env-var file persist_env_line
+# writes (~/.zshenv, ~/.bash_profile, ~/.bashrc) — the same fixed-string test
+# ensure_line_in_file uses to append, so the check and the fix agree.
+check_wsl_code_prompt() {
+  for _rc in "${HOME}/.zshenv" "${HOME}/.bash_profile" "${HOME}/.bashrc"; do
+    if ! grep -qF "$WSL_CODE_PROMPT_LINE" "$_rc" 2>/dev/null; then
+      CHECK_DETAIL="not set in ${_rc##*/}"
+      return 1
+    fi
+  done
+  CHECK_DETAIL="DONT_PROMPT_WSL_INSTALL set in your shell startup files"
+  return 0
+}
+
+# Persist the export line into the env-var files (idempotent append). A fixed
+# value, so there is nothing to update later.
+fix_wsl_code_prompt() {
+  persist_env_line "$WSL_CODE_PROMPT_LINE"
+}
+
 # The Azure Container Registry every developer needs pull/push access to.
 ACR_NAME="uluruscacr"
 
@@ -1428,30 +1458,37 @@ main() {
   #    Auto-installed on Linux only; optional, so a macOS/WSL miss just warns.
   run_check "Visual Studio Code is installed" check_vscode fix_vscode optional
 
-  # 7. Azure + ACR login — signed in and able to reach the uluruscacr registry.
+  # 7. DONT_PROMPT_WSL_INSTALL — only under WSL, where it suppresses VS Code's
+  #    "install VS Code in Windows" prompt on every `code` launch. Optional
+  #    quality-of-life, so a miss just warns; not registered off WSL.
+  if is_wsl; then
+    run_check "DONT_PROMPT_WSL_INSTALL is exported in your shell profile" check_wsl_code_prompt fix_wsl_code_prompt optional
+  fi
+
+  # 8. Azure + ACR login — signed in and able to reach the uluruscacr registry.
   #    Depends on the Azure CLI (4) and Docker (2), so it comes last.
   run_check "Logged in to Azure and ACR uluruscacr accessible" check_acr fix_acr required
 
-  # 8. GitHub CLI — installed and authenticated (gh auth login).
+  # 9. GitHub CLI — installed and authenticated (gh auth login).
   run_check "GitHub CLI is installed and logged in" check_gh fix_gh required
 
-  # 9. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv, ~/.bash_profile and ~/.bashrc
-  #    from the GitHub CLI credential (8), so it must come after it.
+  # 10. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv, ~/.bash_profile and ~/.bashrc
+  #     from the GitHub CLI credential (9), so it must come after it.
   run_check "GITHUB_ACCESS_TOKEN is exported in your shell profile" check_github_token fix_github_token required
 
-  # 10. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv,
+  # 11. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv,
   #     ~/.bash_profile and ~/.bashrc (created with `openssl rand -base64 32` when missing).
   run_check "LUV_TOKEN_CHECKSUM_SECRET is exported in your shell profile" check_checksum_secret fix_checksum_secret required
 
-  # 11. Claude Code — installed, on PATH, up to date, and signed in.
+  # 12. Claude Code — installed, on PATH, up to date, and signed in.
   run_check "Claude Code is installed and logged in" check_claude fix_claude required
 
-  # 12. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv,
+  # 13. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv,
   #     ~/.bash_profile and ~/.bashrc. Entered by hand (paste a JFrog Identity Token).
   run_check "JFrog credentials are exported in your shell profile" check_jfrog_creds fix_jfrog_creds required
 
-  # 13. lumivero-api repository — checked out in the current directory (or we are
-  #     already inside it). Depends on the GitHub CLI (8) for the private clone.
+  # 14. lumivero-api repository — checked out in the current directory (or we are
+  #     already inside it). Depends on the GitHub CLI (9) for the private clone.
   run_check "lumivero-api repository is checked out" check_repo fix_repo required
 
   # With the repo in place (already present or just cloned), offer a branch to
