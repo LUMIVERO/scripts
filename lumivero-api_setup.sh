@@ -597,6 +597,59 @@ fix_make() {
   install_pkg make make
 }
 
+# git — the version-control tool. Needed to clone the repository and select a
+# branch below, and used throughout the workflow. On PATH and runnable is enough;
+# `git --version` doubles as the probe and supplies the version string.
+check_git() {
+  if ! have_cmd git; then
+    CHECK_DETAIL="not installed"
+    return 1
+  fi
+  _ver="$(git --version 2>/dev/null)" || _ver=""
+  CHECK_DETAIL="${_ver:-installed}"
+  return 0
+}
+
+# Install git from the distro package (apt) or Homebrew (macOS) via install_pkg.
+fix_git() {
+  install_pkg git git
+}
+
+# jq — the JSON processor the Lumivero API tooling shells out to. On PATH and
+# runnable is enough; `jq --version` (prints e.g. "jq-1.7.1") is the probe.
+check_jq() {
+  if ! have_cmd jq; then
+    CHECK_DETAIL="not installed"
+    return 1
+  fi
+  _ver="$(jq --version 2>/dev/null)" || _ver=""
+  CHECK_DETAIL="${_ver:-installed}"
+  return 0
+}
+
+# Install jq from the distro package (apt) or Homebrew (macOS) via install_pkg.
+fix_jq() {
+  install_pkg jq jq
+}
+
+# sops — Mozilla SOPS, used to decrypt the API's secret files. On PATH and
+# runnable is enough; `sops --version` is the probe (newer builds append an
+# update-check line, so keep only the first).
+check_sops() {
+  if ! have_cmd sops; then
+    CHECK_DETAIL="not installed"
+    return 1
+  fi
+  _ver="$(sops --version 2>/dev/null | head -n1)" || _ver=""
+  CHECK_DETAIL="${_ver:-installed}"
+  return 0
+}
+
+# Install sops from the distro package (apt) or Homebrew (macOS) via install_pkg.
+fix_sops() {
+  install_pkg sops sops
+}
+
 # The Azure Container Registry every developer needs pull/push access to.
 ACR_NAME="uluruscacr"
 
@@ -1241,30 +1294,39 @@ main() {
   # 5. make — the build tool the lumivero-api workflow is driven through.
   run_check "make is installed" check_make fix_make required
 
-  # 6. Azure + ACR login — signed in and able to reach the uluruscacr registry.
+  # 6. git — the version-control tool (needed by the repo checkout below, #15).
+  run_check "git is installed" check_git fix_git required
+
+  # 7. jq — the JSON processor the API tooling shells out to.
+  run_check "jq is installed" check_jq fix_jq required
+
+  # 8. sops — Mozilla SOPS, used to decrypt the API's secret files.
+  run_check "sops is installed" check_sops fix_sops required
+
+  # 9. Azure + ACR login — signed in and able to reach the uluruscacr registry.
   #    Depends on the Azure CLI (4) and Docker (2), so it comes last.
   run_check "Logged in to Azure and ACR uluruscacr accessible" check_acr fix_acr required
 
-  # 7. GitHub CLI — installed and authenticated (gh auth login).
+  # 10. GitHub CLI — installed and authenticated (gh auth login).
   run_check "GitHub CLI is installed and logged in" check_gh fix_gh required
 
-  # 8. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv, ~/.bash_profile and ~/.bashrc
-  #    from the GitHub CLI credential (7), so it must come after it.
+  # 11. GITHUB_ACCESS_TOKEN — exported in ~/.zshenv, ~/.bash_profile and ~/.bashrc
+  #     from the GitHub CLI credential (10), so it must come after it.
   run_check "GITHUB_ACCESS_TOKEN is exported in your shell profile" check_github_token fix_github_token required
 
-  # 9. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv,
-  #    ~/.bash_profile and ~/.bashrc (created with `openssl rand -base64 32` when missing).
+  # 12. LUV_TOKEN_CHECKSUM_SECRET — a generated secret exported in ~/.zshenv,
+  #     ~/.bash_profile and ~/.bashrc (created with `openssl rand -base64 32` when missing).
   run_check "LUV_TOKEN_CHECKSUM_SECRET is exported in your shell profile" check_checksum_secret fix_checksum_secret required
 
-  # 10. Claude Code — installed, on PATH, up to date, and signed in.
+  # 13. Claude Code — installed, on PATH, up to date, and signed in.
   run_check "Claude Code is installed and logged in" check_claude fix_claude required
 
-  # 11. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv,
+  # 14. JFrog credentials — JFROG_CREDENTIALS_USR/PSW exported in ~/.zshenv,
   #     ~/.bash_profile and ~/.bashrc. Entered by hand (paste a JFrog Identity Token).
   run_check "JFrog credentials are exported in your shell profile" check_jfrog_creds fix_jfrog_creds required
 
-  # 12. lumivero-api repository — checked out in the current directory (or we are
-  #     already inside it). Depends on the GitHub CLI (7) for the private clone.
+  # 15. lumivero-api repository — checked out in the current directory (or we are
+  #     already inside it). Depends on the GitHub CLI (10) for the private clone.
   run_check "lumivero-api repository is checked out" check_repo fix_repo required
 
   # With the repo in place (already present or just cloned), offer a branch to
