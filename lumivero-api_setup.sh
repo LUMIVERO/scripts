@@ -1631,6 +1631,17 @@ main() {
   fi
 
   printf '\n%s%s Environment ready.%s\n\n' "$GREEN" "$ICON_DONE" "$RESET"
+
+  # Everything passed — point the developer at the one command that starts a dev
+  # session. curl … | sh can't cd for them, so we print the step to run by hand.
+  # Drop the `cd` when they are already inside the repo (REPO_DIR=".").
+  if [ "$REPO_DIR" = "." ]; then
+    _start_cmd="make devcontainer"
+  else
+    _start_cmd="cd ${REPO_NAME}; make devcontainer"
+  fi
+  printf '%sTo start developing, run:%s\n' "$BOLD" "$RESET"
+  printf '   %s%s%s\n\n' "$BOLD" "$_start_cmd" "$RESET"
 }
 
 main "$@"
