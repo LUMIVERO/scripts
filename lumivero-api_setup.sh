@@ -64,6 +64,10 @@ PROFILES_CHANGED="" # shell-startup files actually modified this run (space-sepa
 RESTART_REQUIRED="" # set by a fix whose effect only reaches a fresh login session
 REPO_DIR=""         # where check_repo found the repo; consumed by branch selection
 ASSUME_YES=""       # 1 ⇒ auto-accept fixes without prompting (set by resolve_assume_yes)
+ASSUME_YES_EXPLICIT="" # 1 ⇒ assume-yes was requested *explicitly* (--yes/-y or
+                       #   SETUP_ASSUME_YES=1) ⇒ "no interaction at all", so the
+                       #   branch menu is skipped too. Stays empty for an auto-
+                       #   assumed piped (curl … | sh) run, which still shows it.
 
 CHECK_TOTAL=0
 PASS_COUNT=0
@@ -182,10 +186,17 @@ confirm() {
 
 # Decide up front whether fixes are auto-accepted (ASSUME_YES=1) or the developer
 # is asked per fix. A piped run (curl … | sh) always assumes yes and never
-# prompts — there is no interactive operator to ask, so "yes" is the only useful
-# default. A direct run (sh script.sh, ./script.sh) prompts unless --yes/-y is
-# passed or SETUP_ASSUME_YES=1 is set in the environment. Called once from main()
-# before any check runs; confirm() and select_repo_branch() then read ASSUME_YES.
+# prompts for fixes — there is no comfortable way to ask 13 y/n questions when the
+# script itself arrives on stdin, so "yes" is the only useful default. A direct run
+# (sh script.sh, ./script.sh) prompts unless --yes/-y is passed or
+# SETUP_ASSUME_YES=1 is set in the environment.
+#
+# Those last two are an *explicit* "don't interact with me at all" — recorded in
+# ASSUME_YES_EXPLICIT — and so also suppress the interactive branch menu. A piped
+# run only auto-accepts *fixes*: the developer is still at a terminal, so the
+# branch menu (a genuine choice, read from /dev/tty) is still offered. Called once
+# from main() before any check runs; confirm() reads ASSUME_YES and
+# select_repo_branch() reads ASSUME_YES_EXPLICIT.
 resolve_assume_yes() {
   if running_piped; then
     ASSUME_YES=1
@@ -193,12 +204,14 @@ resolve_assume_yes() {
   fi
   if [ "${SETUP_ASSUME_YES:-0}" = "1" ]; then
     ASSUME_YES=1
+    ASSUME_YES_EXPLICIT=1
     return 0
   fi
   for _arg in "$@"; do
     case "$_arg" in
       --yes | -y)
         ASSUME_YES=1
+        ASSUME_YES_EXPLICIT=1
         return 0
         ;;
     esac
@@ -1319,18 +1332,24 @@ check_repo() {
 
 # Once the repo is in place — freshly cloned or already present — fetch every
 # branch and let the developer pick one to check out. Best-effort and never
-# fatal: in assume-yes mode (piped run or --yes), headless (no /dev/tty), or if
-# git/fetch fails, the current branch is kept — as is a blank or invalid
-# selection. All paths return 0. The menu and prompt read from /dev/tty so they
-# work under `curl … | sh`. Called from main() against REPO_DIR.
+# fatal: in explicit non-interactive mode (--yes/-y or SETUP_ASSUME_YES=1),
+# headless (no /dev/tty), or if git/fetch fails, the current branch is kept — as
+# is a blank or invalid selection. All paths return 0. The menu and prompt read
+# from /dev/tty, so a piped `curl … | sh` run still shows the menu (this is the
+# point: a fresh clone there should still get a branch choice). Called from
+# main() against REPO_DIR.
 select_repo_branch() {
   _dir="$1"
 
   have_cmd git || return 0
 
-  # The menu is interactive: skip it (keeping the default branch) in assume-yes
-  # mode or when no controlling terminal can be opened.
-  if [ "$ASSUME_YES" = "1" ]; then
+  # The menu is interactive but has a safe default (Enter keeps the current
+  # branch), so it is not a "fix" to auto-accept: it is offered whenever a
+  # terminal is present, including under a piped `curl … | sh` run. It is skipped
+  # only when assume-yes was requested *explicitly* (--yes/-y or
+  # SETUP_ASSUME_YES=1) — an outright "no interaction" — or when no controlling
+  # terminal can be opened (headless run).
+  if [ "$ASSUME_YES_EXPLICIT" = "1" ]; then
     return 0
   fi
   if ! { true >/dev/tty; } 2>/dev/null; then
