@@ -62,6 +62,7 @@ OS_FAMILY=""        # macos | debian — set by check_os, consumed by install_pk
 CHECK_DETAIL=""     # short context a check may surface beside its result
 PROFILES_CHANGED="" # shell-startup files actually modified this run (space-separated)
 RESTART_REQUIRED="" # set by a fix whose effect only reaches a fresh login session
+REPO_DIR=""         # where check_repo found the repo; consumed by branch selection
 
 CHECK_TOTAL=0
 PASS_COUNT=0
@@ -984,14 +985,20 @@ REPO_URL="https://github.com/lumivero/lumivero-api"
 # The lumivero-api checkout. Satisfied two ways: the current directory is already
 # the repo (its basename is lumivero-api — the developer cd'd in earlier), or a
 # lumivero-api subdirectory is present in the current directory. Cloning lives in
-# the fix; this only reports presence.
+# the fix; this only reports presence. On a hit it records the repo directory in
+# REPO_DIR so main() can offer branch selection against it afterwards (the same
+# whether the repo was already present or just cloned by the fix); REPO_DIR is
+# cleared up front so a miss leaves it empty.
 check_repo() {
+  REPO_DIR=""
   _cwd="$(pwd)"
   if [ "${_cwd##*/}" = "$REPO_NAME" ]; then
+    REPO_DIR="."
     CHECK_DETAIL="already inside ${REPO_NAME}"
     return 0
   fi
   if [ -d "$REPO_NAME" ]; then
+    REPO_DIR="$REPO_NAME"
     CHECK_DETAIL="present at ./${REPO_NAME}"
     return 0
   fi
@@ -999,11 +1006,94 @@ check_repo() {
   return 1
 }
 
+# Once the repo is in place — freshly cloned or already present — fetch every
+# branch and let the developer pick one to check out. Best-effort and never
+# fatal: when run unattended (SETUP_ASSUME_YES), headless (no /dev/tty), or if
+# git/fetch fails, the current branch is kept — as is a blank or invalid
+# selection. All paths return 0. The menu and prompt read from /dev/tty so they
+# work under `curl … | sh`. Called from main() against REPO_DIR.
+select_repo_branch() {
+  _dir="$1"
+
+  have_cmd git || return 0
+
+  # The menu is interactive: skip it (keeping the default branch) when unattended
+  # or when no controlling terminal can be opened.
+  if [ "${SETUP_ASSUME_YES:-0}" = "1" ]; then
+    return 0
+  fi
+  if ! { true >/dev/tty; } 2>/dev/null; then
+    return 0
+  fi
+
+  git -C "$_dir" fetch --all --quiet 2>/dev/null || return 0
+
+  # Remote branches, "refs/remotes/origin/" prefix stripped and the HEAD symref
+  # dropped. We match on the full refname (not %(refname:short)) because the short
+  # form of refs/remotes/origin/HEAD is the bare "origin", which would slip past a
+  # name filter and show up as a phantom branch. A fresh clone has no other local
+  # branch, so origin's refs are the full set.
+  _branches="$(git -C "$_dir" for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null \
+    | sed 's#^refs/remotes/origin/##' | grep -v '^HEAD$')" || _branches=""
+  if [ -z "$_branches" ]; then
+    return 0
+  fi
+
+  _current="$(git -C "$_dir" rev-parse --abbrev-ref HEAD 2>/dev/null)" || _current=""
+  _count="$(printf '%s\n' "$_branches" | wc -l | tr -d ' ')"
+
+  printf '\n   %s  Branches in %s%s%s — select one to check out:\n' \
+    "$ICON_INFO" "$BOLD" "$REPO_NAME" "$RESET" >/dev/tty
+
+  # Numbered list; the same order as the sed lookup below, so the index matches.
+  _i=0
+  printf '%s\n' "$_branches" | while IFS= read -r _b; do
+    _i=$((_i + 1))
+    printf '       %s%2d%s) %s\n' "$DIM" "$_i" "$RESET" "$_b" >/dev/tty
+  done
+
+  printf '%s   %s Branch number [1-%s, Enter keeps %s]: %s' \
+    "$YELLOW" "$ICON_INFO" "$_count" "${_current:-the default branch}" "$RESET" >/dev/tty
+  read -r _sel </dev/tty 2>/dev/null || _sel=""
+
+  # A blank answer keeps the default branch.
+  if [ -z "$_sel" ]; then
+    return 0
+  fi
+
+  # Validate: a number within range. Anything else keeps the default branch.
+  case "$_sel" in
+    *[!0-9]*)
+      printf '   %s  %sNot a number — keeping %s.%s\n' \
+        "$ICON_INFO" "$DIM" "${_current:-the default branch}" "$RESET" >/dev/tty
+      return 0
+      ;;
+  esac
+  if [ "$_sel" -lt 1 ] || [ "$_sel" -gt "$_count" ]; then
+    printf '   %s  %sOut of range — keeping %s.%s\n' \
+      "$ICON_INFO" "$DIM" "${_current:-the default branch}" "$RESET" >/dev/tty
+    return 0
+  fi
+
+  _chosen="$(printf '%s\n' "$_branches" | sed -n "${_sel}p")"
+  [ -n "$_chosen" ] || return 0
+
+  if git -C "$_dir" checkout "$_chosen" >/dev/null 2>&1; then
+    printf '   %s  %sChecked out branch%s %s%s%s\n' \
+      "$ICON_INFO" "$DIM" "$RESET" "$BOLD" "$_chosen" "$RESET" >/dev/tty
+  else
+    printf '   %s  %sCould not check out %s — keeping %s.%s\n' \
+      "$ICON_WARN" "$DIM" "$_chosen" "${_current:-the default branch}" "$RESET" >/dev/tty
+  fi
+}
+
 # Clone the repository into the current directory. Prefer the GitHub CLI when it
 # is present (it carries the auth from check #6, so it works for the private org
 # repo without a separate git credential helper) and fall back to git over HTTPS.
 # curl … | sh cannot change the caller's shell directory, so we can't honour the
-# `cd lumivero-api` step ourselves — we point the developer at it instead.
+# `cd lumivero-api` step ourselves — we point the developer at it instead. Branch
+# selection is not done here: main() runs it against REPO_DIR after the post-fix
+# re-check confirms the clone, so it happens for an already-present repo too.
 fix_repo() {
   if have_cmd gh; then
     gh repo clone "lumivero/${REPO_NAME}" || return 1
@@ -1176,6 +1266,14 @@ main() {
   # 12. lumivero-api repository — checked out in the current directory (or we are
   #     already inside it). Depends on the GitHub CLI (7) for the private clone.
   run_check "lumivero-api repository is checked out" check_repo fix_repo required
+
+  # With the repo in place (already present or just cloned), offer a branch to
+  # check out. REPO_DIR is set by check_repo on a hit (and stays set across the
+  # post-fix re-check), empty on a miss — so this is skipped when the repo is
+  # absent. select_repo_branch is non-fatal and self-skips when unattended/headless.
+  if [ -n "$REPO_DIR" ]; then
+    select_repo_branch "$REPO_DIR"
+  fi
 
   print_summary
   print_reload_notice
