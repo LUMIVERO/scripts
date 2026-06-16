@@ -143,6 +143,9 @@ The script is served from GitHub Pages and run as `curl -fsSL … | sh`:
   own inline `case ":$PATH:" in *":$dir:"*) ;; *) … ;; esac` guard.
 - **Prefer self-contained installers.** E.g. the devcontainers install script
   bundles its own Node, so the check needs no system npm — keeps the constraint.
-- **Prompts** must come from `confirm` (reads `/dev/tty`, honours
-  `SETUP_ASSUME_YES=1`, declines quietly when headless). Never read from stdin —
-  the script itself occupies stdin under `curl … | sh`.
+- **Prompts** must come from `confirm` (reads `/dev/tty`, returns yes without
+  asking when `ASSUME_YES=1`, declines quietly when headless). Never read from
+  stdin — the script itself occupies stdin under `curl … | sh`. `ASSUME_YES` is
+  resolved once by `resolve_assume_yes` at the top of `main`: set under a piped
+  `curl … | sh` run, or a direct run given `--yes`/`-y` or `SETUP_ASSUME_YES=1`.
+  A new yes/no fix prompt therefore needs no extra wiring — just call `confirm`.

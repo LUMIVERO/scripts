@@ -78,8 +78,8 @@ WSL detection lives in the `is_wsl()` helper (checks `WSL_INTEROP`/`WSL_DISTRO_N
 ### Presentation & interaction notes
 
 - **Colour degrades gracefully:** ANSI colour is emitted only when stdout is a TTY, `NO_COLOR` is unset, and `TERM` isn't `dumb`. Emoji icons are always printed (they're plain UTF-8). Transient "⏳ …" progress lines are shown only on a TTY and overwritten by the result.
-- **Prompts read from `/dev/tty`,** not stdin, so they work under `curl … | sh` (where the script itself occupies stdin). `confirm` probes that `/dev/tty` can actually be opened and declines quietly otherwise (headless/CI).
-- **Unattended runs:** set `SETUP_ASSUME_YES=1` to auto-accept every fix prompt.
+- **Prompts read from `/dev/tty`,** not stdin, so they work under `curl … | sh` (where the script itself occupies stdin). `confirm` probes that `/dev/tty` can actually be opened and declines quietly otherwise (headless run, direct mode).
+- **Fixes are auto-accepted by default under `curl … | sh`.** `resolve_assume_yes` (run once at the top of `main`) sets `ASSUME_YES=1` — so `confirm` returns yes without prompting — whenever the script was *piped* into a shell (detected via `running_piped`: `$0`'s basename is a shell name, because the shell read the script from stdin). A *direct* run (`sh <app>_setup.sh`, `./…`) prompts per fix instead, unless `--yes`/`-y` is passed or `SETUP_ASSUME_YES=1` is set in the environment. The interactive menu in `select_repo_branch` is likewise skipped (default branch kept) in assume-yes mode.
 - **Plain line-by-line output:** each check prints one coloured pass/fail/warn line as it completes — a transient "⏳ …" progress line on a TTY, replaced in place by the result; a final summary and exit code follow.
 
 ## Conventions

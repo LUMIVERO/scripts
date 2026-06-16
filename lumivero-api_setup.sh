@@ -63,6 +63,7 @@ CHECK_DETAIL=""     # short context a check may surface beside its result
 PROFILES_CHANGED="" # shell-startup files actually modified this run (space-separated)
 RESTART_REQUIRED="" # set by a fix whose effect only reaches a fresh login session
 REPO_DIR=""         # where check_repo found the repo; consumed by branch selection
+ASSUME_YES=""       # 1 ⇒ auto-accept fixes without prompting (set by resolve_assume_yes)
 
 CHECK_TOTAL=0
 PASS_COUNT=0
@@ -154,11 +155,13 @@ print_reload_notice() {
   printf 'session (or start a new shell) for them to take effect.%s\n' "$RESET"
 }
 
-# Ask a yes/no question. Reads from the controlling terminal so it works even
-# when the script itself arrives on stdin (curl … | sh). Honours
-# SETUP_ASSUME_YES=1 for unattended runs; declines when no terminal is present.
+# Ask a yes/no question. Returns success without prompting when ASSUME_YES is
+# set — a piped curl … | sh run, an explicit --yes/-y, or SETUP_ASSUME_YES=1
+# (resolve_assume_yes decides this once, up front). Otherwise reads the answer
+# from the controlling terminal so it works even when the script itself arrives
+# on stdin; declines quietly when no terminal is present (headless run).
 confirm() {
-  if [ "${SETUP_ASSUME_YES:-0}" = "1" ]; then
+  if [ "$ASSUME_YES" = "1" ]; then
     return 0
   fi
   # Need an interactive terminal; bail out quietly if one cannot be opened
@@ -177,6 +180,31 @@ confirm() {
   esac
 }
 
+# Decide up front whether fixes are auto-accepted (ASSUME_YES=1) or the developer
+# is asked per fix. A piped run (curl … | sh) always assumes yes and never
+# prompts — there is no interactive operator to ask, so "yes" is the only useful
+# default. A direct run (sh script.sh, ./script.sh) prompts unless --yes/-y is
+# passed or SETUP_ASSUME_YES=1 is set in the environment. Called once from main()
+# before any check runs; confirm() and select_repo_branch() then read ASSUME_YES.
+resolve_assume_yes() {
+  if running_piped; then
+    ASSUME_YES=1
+    return 0
+  fi
+  if [ "${SETUP_ASSUME_YES:-0}" = "1" ]; then
+    ASSUME_YES=1
+    return 0
+  fi
+  for _arg in "$@"; do
+    case "$_arg" in
+      --yes | -y)
+        ASSUME_YES=1
+        return 0
+        ;;
+    esac
+  done
+}
+
 # ----------------------------------------------------------------------------
 # Environment probes.
 # ----------------------------------------------------------------------------
@@ -185,6 +213,22 @@ is_wsl() {
   [ -n "${WSL_INTEROP:-}" ] && return 0
   [ -n "${WSL_DISTRO_NAME:-}" ] && return 0
   grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null
+}
+
+# True when this script was piped into the shell (curl … | sh): the shell then
+# reads the script from standard input, so $0 is the shell's own name (sh, dash,
+# bash, …) rather than a path to this file — which is what a direct run
+# (sh script.sh, ./script.sh) leaves in $0. We test $0's basename so an absolute
+# shell path (/bin/sh) and a login shell (-sh) are recognised too. This is what
+# resolve_assume_yes keys the prompt-less default off, so it must not depend on a
+# terminal: a direct run with redirected stdin (CI) is still a direct run.
+running_piped() {
+  _self="${0##*/}"   # basename of $0
+  _self="${_self#-}" # a login shell prepends '-' (e.g. -sh)
+  case "$_self" in
+    sh | bash | dash | ash | ksh | mksh | zsh | busybox) return 0 ;;
+  esac
+  return 1
 }
 
 # Native Windows is unsupported: the API environment requires Ubuntu under WSL.
@@ -1275,7 +1319,7 @@ check_repo() {
 
 # Once the repo is in place — freshly cloned or already present — fetch every
 # branch and let the developer pick one to check out. Best-effort and never
-# fatal: when run unattended (SETUP_ASSUME_YES), headless (no /dev/tty), or if
+# fatal: in assume-yes mode (piped run or --yes), headless (no /dev/tty), or if
 # git/fetch fails, the current branch is kept — as is a blank or invalid
 # selection. All paths return 0. The menu and prompt read from /dev/tty so they
 # work under `curl … | sh`. Called from main() against REPO_DIR.
@@ -1284,9 +1328,9 @@ select_repo_branch() {
 
   have_cmd git || return 0
 
-  # The menu is interactive: skip it (keeping the default branch) when unattended
-  # or when no controlling terminal can be opened.
-  if [ "${SETUP_ASSUME_YES:-0}" = "1" ]; then
+  # The menu is interactive: skip it (keeping the default branch) in assume-yes
+  # mode or when no controlling terminal can be opened.
+  if [ "$ASSUME_YES" = "1" ]; then
     return 0
   fi
   if ! { true >/dev/tty; } 2>/dev/null; then
@@ -1459,6 +1503,10 @@ finish_restart_required() {
 # ----------------------------------------------------------------------------
 
 main() {
+  # Decide whether fixes are auto-accepted (piped runs and --yes) or prompted
+  # for. Must come before any check so confirm()/select_repo_branch() see it.
+  resolve_assume_yes "$@"
+
   # Windows without WSL has no supported path: bail with guidance before any
   # check runs, rather than trying to install Docker.
   bail_if_windows_without_wsl
