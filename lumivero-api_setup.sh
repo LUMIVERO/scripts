@@ -446,23 +446,78 @@ check_docker() {
   return 1
 }
 
-# Auto-install Docker only on Linux, via the official convenience script, then
-# add the current user to the docker group. On macOS there is no automated fix:
-# the developer is asked to install OrbStack and start it.
+# Resolve which Docker apt repository and release codename to use for this
+# Debian-family distro. Docker publishes repos for 'debian' and 'ubuntu' only, so
+# Pop!_OS (ID=pop) — Ubuntu-derived — uses the ubuntu repo keyed to its upstream
+# Ubuntu codename (UBUNTU_CODENAME). Prints "<repo> <codename>" on success;
+# nothing (and returns non-zero) when the distro or codename can't be resolved.
+# os-release is sourced in a subshell so its vars don't leak into our globals and
+# unset ones don't trip `set -u`.
+docker_apt_target() {
+  [ -r /etc/os-release ] || return 1
+  (
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    case "${ID:-}" in
+      debian)
+        [ -n "${VERSION_CODENAME:-}" ] || exit 1
+        printf 'debian %s\n' "$VERSION_CODENAME"
+        ;;
+      ubuntu)
+        _cn="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+        [ -n "$_cn" ] || exit 1
+        printf 'ubuntu %s\n' "$_cn"
+        ;;
+      pop)
+        _cn="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+        [ -n "$_cn" ] || exit 1
+        printf 'ubuntu %s\n' "$_cn"
+        ;;
+      *) exit 1 ;;
+    esac
+  )
+}
+
+# Install Docker on Linux from Docker's official apt repository
+# (https://docs.docker.com/engine/install/), the same keyring + sources-list
+# shape as the VS Code fix, then add the current user to the docker group. We use
+# the apt repo rather than the get.docker.com convenience script specifically to
+# avoid that script's hardcoded "WSL DETECTED" banner and its forced 20-second
+# `sleep` — the apt repo install has no such prompt. On macOS there is no
+# automated fix: the developer is asked to install OrbStack and start it.
 fix_docker() {
   if [ "$OS_FAMILY" != "debian" ]; then
     CHECK_DETAIL="install OrbStack (https://orbstack.dev), start it, then re-run"
     return 1
   fi
 
-  curl -fsSL https://get.docker.com | sh || return 1
+  _target="$(docker_apt_target)" || {
+    CHECK_DETAIL="could not determine the Docker apt repository for this distribution"
+    return 1
+  }
+  _repo="${_target%% *}"
+  _codename="${_target#* }"
+
+  # curl fetches the signing key; ca-certificates lets it trust download.docker.com.
+  run_root apt-get update || return 1
+  run_root apt-get install -y ca-certificates curl || return 1
+
+  # Docker's ASCII-armored key is read directly by apt via signed-by (no gpg
+  # dearmor step), so it keeps its .asc extension.
+  run_root install -m 0755 -d /etc/apt/keyrings || return 1
+  run_root curl -fsSL "https://download.docker.com/linux/${_repo}/gpg" -o /etc/apt/keyrings/docker.asc || return 1
+  run_root chmod a+r /etc/apt/keyrings/docker.asc || return 1
+
+  _arch="$(dpkg --print-architecture)"
+  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/%s %s stable\n' \
+    "$_arch" "$_repo" "$_codename" \
+    | run_root tee /etc/apt/sources.list.d/docker.list >/dev/null || return 1
+
+  run_root apt-get update || return 1
+  run_root apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || return 1
 
   _user="${USER:-$(id -un)}"
-  if have_cmd sudo; then
-    sudo usermod -aG docker "$_user" || return 1
-  else
-    usermod -aG docker "$_user" || return 1
-  fi
+  run_root usermod -aG docker "$_user" || return 1
 
   # The install succeeded, but the freshly added 'docker' group membership only
   # takes effect in a new login session — the daemon isn't usable in this one,
