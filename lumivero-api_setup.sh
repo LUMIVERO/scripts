@@ -1409,13 +1409,14 @@ check_repo() {
 }
 
 # Once the repo is in place — freshly cloned or already present — fetch every
-# branch and let the developer pick one to check out. Best-effort and never
-# fatal: in explicit non-interactive mode (--yes/-y or SETUP_ASSUME_YES=1),
-# headless (no /dev/tty), or if git/fetch fails, the current branch is kept — as
-# is a blank or invalid selection. All paths return 0. The menu and prompt read
-# from /dev/tty, so a piped `curl … | sh` run still shows the menu (this is the
-# point: a fresh clone there should still get a branch choice). Called from
-# main() against REPO_DIR.
+# branch and let the developer pick one to check out, then fast-forward it onto
+# origin so an already-present repo gets the latest changes (not a stale local
+# branch). Best-effort and never fatal: in explicit non-interactive mode
+# (--yes/-y or SETUP_ASSUME_YES=1), headless (no /dev/tty), or if git/fetch
+# fails, the current branch is kept — as is a blank or invalid selection. All
+# paths return 0. The menu and prompt read from /dev/tty, so a piped
+# `curl … | sh` run still shows the menu (this is the point: a fresh clone there
+# should still get a branch choice). Called from main() against REPO_DIR.
 select_repo_branch() {
   _dir="$1"
 
@@ -1492,6 +1493,25 @@ select_repo_branch() {
   else
     printf '   %s  %sCould not check out %s — keeping %s.%s\n' \
       "$ICON_WARN" "$DIM" "$_chosen" "${_current:-the default branch}" "$RESET" >/dev/tty
+    return 0
+  fi
+
+  # An already-present repo may have a stale local branch, so checkout alone can
+  # land on old commits. Bring it up to date with origin. We already fetched
+  # --all above, so origin/$_chosen is current — fast-forward the local branch
+  # onto it. --ff-only never merges or rewrites: if the local branch has diverged
+  # (local commits not on origin) it declines and we keep what is checked out.
+  _local="$(git -C "$_dir" rev-parse HEAD 2>/dev/null)" || _local=""
+  _remote="$(git -C "$_dir" rev-parse "origin/$_chosen" 2>/dev/null)" || _remote=""
+  if [ "$_local" = "$_remote" ]; then
+    printf '   %s  %sAlready up to date with%s %sorigin/%s%s\n' \
+      "$ICON_INFO" "$DIM" "$RESET" "$BOLD" "$_chosen" "$RESET" >/dev/tty
+  elif git -C "$_dir" merge --ff-only "origin/$_chosen" >/dev/null 2>&1; then
+    printf '   %s  %sPulled latest changes for%s %s%s%s\n' \
+      "$ICON_INFO" "$DIM" "$RESET" "$BOLD" "$_chosen" "$RESET" >/dev/tty
+  else
+    printf '   %s  %sCould not fast-forward %s — keeping local state (it may have diverged).%s\n' \
+      "$ICON_WARN" "$DIM" "$_chosen" "$RESET" >/dev/tty
   fi
 }
 
