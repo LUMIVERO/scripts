@@ -1301,6 +1301,84 @@ fix_jfrog_creds() {
   persist_env_line "export ${JFROG_PSW_VAR}=\"${_psw}\""
 }
 
+# ~/.ssh with an ed25519 keypair. `make devcontainer` bind-mounts the developer's
+# ~/.ssh into the dev container so git-over-SSH works inside it, so the directory
+# must exist and hold a usable key. Satisfied when ~/.ssh exists and both halves
+# of the keypair (id_ed25519 and id_ed25519.pub) are present; the fix creates the
+# directory and generates the keypair.
+SSH_DIR="${HOME}/.ssh"
+SSH_KEY="${SSH_DIR}/id_ed25519"
+
+check_ssh_key() {
+  if [ ! -d "$SSH_DIR" ]; then
+    CHECK_DETAIL="${SSH_DIR} does not exist"
+    return 1
+  fi
+  if [ ! -f "$SSH_KEY" ]; then
+    CHECK_DETAIL="no ${SSH_KEY##*/} private key in ${SSH_DIR}"
+    return 1
+  fi
+  if [ ! -f "${SSH_KEY}.pub" ]; then
+    CHECK_DETAIL="private key present but ${SSH_KEY##*/}.pub is missing in ${SSH_DIR}"
+    return 1
+  fi
+  CHECK_DETAIL="ed25519 keypair present in ${SSH_DIR}"
+  return 0
+}
+
+# Create ~/.ssh (mode 700) when absent and make sure an ed25519 keypair is present
+# so `make devcontainer` can mount it. ssh-keygen ships with openssh-client and is
+# virtually always installed; install it if not. A fresh keypair is generated only
+# when the private key is absent — an existing key is never overwritten (that would
+# prompt to overwrite and could clobber a working credential). When only the public
+# half is missing it is re-derived from the private key (it has no passphrase, so
+# no prompt); </dev/null keeps that from hanging on a passphrase-protected key.
+# The keypair is generated with an empty passphrase (-N "") so it works unattended.
+fix_ssh_key() {
+  if ! have_cmd ssh-keygen; then
+    install_pkg openssh openssh-client || {
+      CHECK_DETAIL="ssh-keygen not available and could not install openssh-client"
+      return 1
+    }
+  fi
+
+  if [ ! -d "$SSH_DIR" ]; then
+    mkdir -p "$SSH_DIR" || {
+      CHECK_DETAIL="could not create ${SSH_DIR}"
+      return 1
+    }
+  fi
+  chmod 700 "$SSH_DIR" 2>/dev/null || true
+
+  _host="$(uname -n 2>/dev/null)" || _host="localhost"
+  _comment="${USER:-$(id -un 2>/dev/null)}@${_host}"
+
+  if [ ! -f "$SSH_KEY" ]; then
+    # No private key — generate a fresh pair (writes both id_ed25519 and .pub).
+    # -f points at a non-existent file, so ssh-keygen never prompts to overwrite.
+    if ! ssh-keygen -t ed25519 -C "$_comment" -f "$SSH_KEY" -N "" >/dev/null 2>&1; then
+      CHECK_DETAIL="ssh-keygen failed to generate the keypair"
+      return 1
+    fi
+  elif [ ! -f "${SSH_KEY}.pub" ]; then
+    # Private key present but its public half is missing — re-derive it. Write to a
+    # temp file first so a failure can't leave a truncated/empty .pub behind.
+    _tmp="$(mktemp 2>/dev/null)" || _tmp="${SSH_KEY}.pub.tmp"
+    if ssh-keygen -y -f "$SSH_KEY" </dev/null >"$_tmp" 2>/dev/null; then
+      mv "$_tmp" "${SSH_KEY}.pub" || {
+        rm -f "$_tmp"
+        CHECK_DETAIL="could not write ${SSH_KEY##*/}.pub"
+        return 1
+      }
+      chmod 644 "${SSH_KEY}.pub" 2>/dev/null || true
+    else
+      rm -f "$_tmp"
+      CHECK_DETAIL="could not re-derive ${SSH_KEY##*/}.pub from the private key"
+      return 1
+    fi
+  fi
+}
+
 # The Lumivero API repository and where it lives on GitHub. The checkout is
 # expected in the developer's current working directory (curl … | sh runs there).
 REPO_NAME="lumivero-api"
@@ -1609,7 +1687,11 @@ main() {
   #     ~/.bash_profile and ~/.bashrc. Entered by hand (paste a JFrog Identity Token).
   run_check "JFrog credentials are exported in your shell profile" check_jfrog_creds fix_jfrog_creds required
 
-  # 14. lumivero-api repository — checked out in the current directory (or we are
+  # 14. SSH keypair — ~/.ssh with an ed25519 key, so `make devcontainer` can mount
+  #     it into the dev container (git over SSH then works inside the container).
+  run_check "SSH keypair present in ~/.ssh" check_ssh_key fix_ssh_key required
+
+  # 15. lumivero-api repository — checked out in the current directory (or we are
   #     already inside it). Depends on the GitHub CLI (9) for the private clone.
   run_check "lumivero-api repository is checked out" check_repo fix_repo required
 
