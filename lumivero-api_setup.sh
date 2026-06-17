@@ -1408,15 +1408,40 @@ check_repo() {
   return 1
 }
 
+# Fast-forward the named branch in $_dir onto its origin counterpart and report
+# the outcome. Assumes origin refs were just fetched. Best-effort and never
+# fatal: a branch with no origin/<branch> (local-only or detached HEAD) is left
+# untouched, and a diverged branch (local commits not on origin) is kept with a
+# warning — --ff-only never merges or rewrites. Always returns 0.
+fast_forward_branch() {
+  _ffd="$1"
+  _ffb="$2"
+  [ -n "$_ffb" ] && [ "$_ffb" != "HEAD" ] || return 0
+  _remote="$(git -C "$_ffd" rev-parse "origin/$_ffb" 2>/dev/null)" || return 0
+  _local="$(git -C "$_ffd" rev-parse HEAD 2>/dev/null)" || _local=""
+  if [ "$_local" = "$_remote" ]; then
+    printf '   %s  %sAlready up to date with%s %sorigin/%s%s\n' \
+      "$ICON_INFO" "$DIM" "$RESET" "$BOLD" "$_ffb" "$RESET" >/dev/tty
+  elif git -C "$_ffd" merge --ff-only "origin/$_ffb" >/dev/null 2>&1; then
+    printf '   %s  %sPulled latest changes for%s %s%s%s\n' \
+      "$ICON_INFO" "$DIM" "$RESET" "$BOLD" "$_ffb" "$RESET" >/dev/tty
+  else
+    printf '   %s  %sCould not fast-forward %s — keeping local state (it may have diverged).%s\n' \
+      "$ICON_WARN" "$DIM" "$_ffb" "$RESET" >/dev/tty
+  fi
+}
+
 # Once the repo is in place — freshly cloned or already present — fetch every
-# branch and let the developer pick one to check out, then fast-forward it onto
-# origin so an already-present repo gets the latest changes (not a stale local
-# branch). Best-effort and never fatal: in explicit non-interactive mode
-# (--yes/-y or SETUP_ASSUME_YES=1), headless (no /dev/tty), or if git/fetch
-# fails, the current branch is kept — as is a blank or invalid selection. All
-# paths return 0. The menu and prompt read from /dev/tty, so a piped
-# `curl … | sh` run still shows the menu (this is the point: a fresh clone there
-# should still get a branch choice). Called from main() against REPO_DIR.
+# branch and let the developer pick one to check out, then fast-forward the
+# resulting branch onto origin so an already-present repo gets the latest changes
+# (not a stale local branch). The fast-forward runs whether the developer picks a
+# new branch *or* keeps the current one (a blank/invalid answer), so just running
+# the script on an existing checkout pulls the latest. Best-effort and never
+# fatal: in explicit non-interactive mode (--yes/-y or SETUP_ASSUME_YES=1),
+# headless (no /dev/tty), or if git/fetch fails, the current branch is kept and
+# left as-is. All paths return 0. The menu and prompt read from /dev/tty, so a
+# piped `curl … | sh` run still shows the menu (this is the point: a fresh clone
+# there should still get a branch choice). Called from main() against REPO_DIR.
 select_repo_branch() {
   _dir="$1"
 
@@ -1462,57 +1487,51 @@ select_repo_branch() {
   done
 
   printf '%s   %s Branch number [1-%s, Enter keeps %s]: %s' \
-    "$YELLOW" "$ICON_INFO" "$_count" "${_current:-the default branch}" "$RESET" >/dev/tty
+    "$YELLOW" "$ICON_INFO" "$_count" "${_current:-the current branch}" "$RESET" >/dev/tty
   read -r _sel </dev/tty 2>/dev/null || _sel=""
 
-  # A blank answer keeps the default branch.
-  if [ -z "$_sel" ]; then
-    return 0
+  # Decide the target branch. A valid number selects from the list; a blank,
+  # non-numeric, or out-of-range answer keeps the current branch. Every path
+  # then fetches-and-fast-forwards the resulting branch below, so even "keep the
+  # current branch" pulls the latest changes for an already-present repo.
+  _target="$_current"
+  if [ -n "$_sel" ]; then
+    case "$_sel" in
+      *[!0-9]*)
+        printf '   %s  %sNot a number — keeping %s.%s\n' \
+          "$ICON_INFO" "$DIM" "${_current:-the current branch}" "$RESET" >/dev/tty
+        ;;
+      *)
+        if [ "$_sel" -ge 1 ] && [ "$_sel" -le "$_count" ]; then
+          _target="$(printf '%s\n' "$_branches" | sed -n "${_sel}p")"
+        else
+          printf '   %s  %sOut of range — keeping %s.%s\n' \
+            "$ICON_INFO" "$DIM" "${_current:-the current branch}" "$RESET" >/dev/tty
+        fi
+        ;;
+    esac
   fi
+  [ -n "$_target" ] || return 0
 
-  # Validate: a number within range. Anything else keeps the default branch.
-  case "$_sel" in
-    *[!0-9]*)
-      printf '   %s  %sNot a number — keeping %s.%s\n' \
-        "$ICON_INFO" "$DIM" "${_current:-the default branch}" "$RESET" >/dev/tty
+  # Announce what we are about to do, then do it. We already fetched --all above,
+  # so this is: switch branches (only when the target differs from the current
+  # one) and fast-forward onto origin to pull the latest changes.
+  if [ "$_target" = "$_current" ]; then
+    printf '   %s  %sStaying on%s %s%s%s%s — pulling the latest changes from origin/%s…%s\n' \
+      "$ICON_INFO" "$DIM" "$RESET" "$BOLD" "$_target" "$RESET" "$DIM" "$_target" "$RESET" >/dev/tty
+  else
+    printf '   %s  %sChecking out%s %s%s%s%s — switching branch and pulling the latest changes from origin/%s…%s\n' \
+      "$ICON_INFO" "$DIM" "$RESET" "$BOLD" "$_target" "$RESET" "$DIM" "$_target" "$RESET" >/dev/tty
+    if ! git -C "$_dir" checkout "$_target" >/dev/null 2>&1; then
+      printf '   %s  %sCould not check out %s — keeping %s.%s\n' \
+        "$ICON_WARN" "$DIM" "$_target" "${_current:-the current branch}" "$RESET" >/dev/tty
       return 0
-      ;;
-  esac
-  if [ "$_sel" -lt 1 ] || [ "$_sel" -gt "$_count" ]; then
-    printf '   %s  %sOut of range — keeping %s.%s\n' \
-      "$ICON_INFO" "$DIM" "${_current:-the default branch}" "$RESET" >/dev/tty
-    return 0
-  fi
-
-  _chosen="$(printf '%s\n' "$_branches" | sed -n "${_sel}p")"
-  [ -n "$_chosen" ] || return 0
-
-  if git -C "$_dir" checkout "$_chosen" >/dev/null 2>&1; then
+    fi
     printf '   %s  %sChecked out branch%s %s%s%s\n' \
-      "$ICON_INFO" "$DIM" "$RESET" "$BOLD" "$_chosen" "$RESET" >/dev/tty
-  else
-    printf '   %s  %sCould not check out %s — keeping %s.%s\n' \
-      "$ICON_WARN" "$DIM" "$_chosen" "${_current:-the default branch}" "$RESET" >/dev/tty
-    return 0
+      "$ICON_INFO" "$DIM" "$RESET" "$BOLD" "$_target" "$RESET" >/dev/tty
   fi
 
-  # An already-present repo may have a stale local branch, so checkout alone can
-  # land on old commits. Bring it up to date with origin. We already fetched
-  # --all above, so origin/$_chosen is current — fast-forward the local branch
-  # onto it. --ff-only never merges or rewrites: if the local branch has diverged
-  # (local commits not on origin) it declines and we keep what is checked out.
-  _local="$(git -C "$_dir" rev-parse HEAD 2>/dev/null)" || _local=""
-  _remote="$(git -C "$_dir" rev-parse "origin/$_chosen" 2>/dev/null)" || _remote=""
-  if [ "$_local" = "$_remote" ]; then
-    printf '   %s  %sAlready up to date with%s %sorigin/%s%s\n' \
-      "$ICON_INFO" "$DIM" "$RESET" "$BOLD" "$_chosen" "$RESET" >/dev/tty
-  elif git -C "$_dir" merge --ff-only "origin/$_chosen" >/dev/null 2>&1; then
-    printf '   %s  %sPulled latest changes for%s %s%s%s\n' \
-      "$ICON_INFO" "$DIM" "$RESET" "$BOLD" "$_chosen" "$RESET" >/dev/tty
-  else
-    printf '   %s  %sCould not fast-forward %s — keeping local state (it may have diverged).%s\n' \
-      "$ICON_WARN" "$DIM" "$_chosen" "$RESET" >/dev/tty
-  fi
+  fast_forward_branch "$_dir" "$_target"
 }
 
 # Clone the repository into the current directory. Prefer the GitHub CLI when it
