@@ -342,6 +342,23 @@ persist_env_line() {
   ensure_line_in_file "${HOME}/.bashrc" "$1"
 }
 
+# Same reach as persist_env_line, but skip any file that already exports <var> —
+# whatever its value. For a hand-entered secret the developer may already manage
+# their own way (a literal token, a 1Password `op://` reference, a command
+# substitution), appending our line would leave two conflicting exports of the
+# same variable in one file, with the last one sourced silently winning over
+# theirs. Reads the files with exported_value_in (defined further down, next to
+# the env-var checks that use it).
+persist_env_var_unless_set() {
+  _pe_var="$1"
+  _pe_line="$2"
+  for _pe_file in "${HOME}/.zshenv" "${HOME}/.bash_profile" "${HOME}/.bashrc"; do
+    _pe_cur="$(exported_value_in "$_pe_file" "$_pe_var")" || _pe_cur=""
+    [ -z "$_pe_cur" ] || continue
+    ensure_line_in_file "$_pe_file" "$_pe_line"
+  done
+}
+
 # Persist a PATH line so every shell sees it: zsh ~/.zprofile (login) + bash
 # ~/.bash_profile (login) and ~/.bashrc (interactive non-login). The line must be
 # the self-guarding form (see DEVCONTAINER_PATH_LINE) so re-sourcing ~/.bashrc in
@@ -1128,8 +1145,11 @@ fix_checksum_secret() {
     fi
   fi
 
+  # Only the files missing the variable are written, so a secret the developer
+  # already exports their own way is never shadowed by a second export of the
+  # same variable (see persist_env_var_unless_set).
   _line="export ${CHECKSUM_SECRET_VAR}=\"${_val}\""
-  persist_env_line "$_line"
+  persist_env_var_unless_set "$CHECKSUM_SECRET_VAR" "$_line"
 }
 
 # The official install.sh writes the native build to ~/.local/bin, so the
@@ -1294,11 +1314,77 @@ fix_jfrog_creds() {
     fi
   fi
 
-  # Write the same value to both files so bash and zsh agree. The token alphabet
-  # carries no characters special inside double quotes (same assumption as the
-  # base64 checksum secret above).
-  persist_env_line "export ${JFROG_USR_VAR}=\"${_usr}\""
-  persist_env_line "export ${JFROG_PSW_VAR}=\"${_psw}\""
+  # Write the same value to every file that is missing it so bash and zsh agree,
+  # leaving a file that already exports the variable untouched — a credential the
+  # developer manages their own way must not be shadowed by a second export (see
+  # persist_env_var_unless_set). Each variable is guarded on its own, so a file
+  # holding only one of the pair still gets the other. The token alphabet carries
+  # no characters special inside double quotes (same assumption as the base64
+  # checksum secret above).
+  persist_env_var_unless_set "$JFROG_USR_VAR" "export ${JFROG_USR_VAR}=\"${_usr}\""
+  persist_env_var_unless_set "$JFROG_PSW_VAR" "export ${JFROG_PSW_VAR}=\"${_psw}\""
+}
+
+# LUV_SONARQUBE_TOKEN — the SonarQube user token the Lumivero API tooling uses to
+# reach the enterprise SonarQube instance. A regular environment variable, so it
+# lives in the shell startup files (zsh ~/.zshenv; bash ~/.bash_profile and
+# ~/.bashrc), persisted verbatim like the JFrog credentials above: a hand-entered
+# secret with no source to derive it from, so the resolver-line trick used for
+# GITHUB_ACCESS_TOKEN does not apply. The developer generates the token in the
+# SonarQube UI (My Account > Security) and pastes it.
+SONARQUBE_TOKEN_VAR="LUV_SONARQUBE_TOKEN"
+SONARQUBE_URL="https://sonarqube-ent.lumivero.com/"
+
+# Satisfied when the token is exported (to a non-empty value) in every env-var
+# file persist_env_line writes (~/.zshenv, ~/.bash_profile, ~/.bashrc).
+check_sonarqube_token() {
+  for _rc in "${HOME}/.zshenv" "${HOME}/.bash_profile" "${HOME}/.bashrc"; do
+    _cur="$(exported_value_in "$_rc" "$SONARQUBE_TOKEN_VAR")" || _cur=""
+    if [ -z "$_cur" ]; then
+      CHECK_DETAIL="not set in ${_rc##*/}"
+      return 1
+    fi
+  done
+  CHECK_DETAIL="set in your shell startup files"
+  return 0
+}
+
+# Persist the token verbatim to the env-var files that are missing it, leaving any
+# file that already exports it untouched (see persist_env_var_unless_set). A value
+# already present in any of them is reused, so re-runs never clobber it and the
+# files end up in sync; the developer is prompted only when none has one. The
+# prompt reads from /dev/tty (the script itself occupies stdin under curl … | sh)
+# with echo off, so a pasted secret is not shown on screen.
+fix_sonarqube_token() {
+  _tok="$(exported_value_in "${HOME}/.zshenv" "$SONARQUBE_TOKEN_VAR")" || _tok=""
+  [ -n "$_tok" ] || { _tok="$(exported_value_in "${HOME}/.bash_profile" "$SONARQUBE_TOKEN_VAR")" || _tok=""; }
+  [ -n "$_tok" ] || { _tok="$(exported_value_in "${HOME}/.bashrc" "$SONARQUBE_TOKEN_VAR")" || _tok=""; }
+
+  if [ -z "$_tok" ]; then
+    # Prompting needs a controlling terminal; bail cleanly when headless (CI).
+    if ! { true >/dev/tty; } 2>/dev/null; then
+      CHECK_DETAIL="no terminal to enter the token; set ${SONARQUBE_TOKEN_VAR} manually"
+      return 1
+    fi
+    printf '   %s  Generate a user token at %saccount/security, then paste it below.\n' \
+      "$ICON_INFO" "$SONARQUBE_URL" >/dev/tty
+    printf '%s   %s SonarQube token: %s' "$YELLOW" "$ICON_INFO" "$RESET" >/dev/tty
+    stty -echo </dev/tty 2>/dev/null || true
+    read -r _tok </dev/tty 2>/dev/null || _tok=""
+    stty echo </dev/tty 2>/dev/null || true
+    printf '\n' >/dev/tty 2>/dev/null
+    if [ -z "$_tok" ]; then
+      CHECK_DETAIL="no SonarQube token entered"
+      return 1
+    fi
+  fi
+
+  # Write only to the files that don't already export the variable, so an
+  # existing line (e.g. an `op://` reference resolved by the developer's own
+  # tooling) is never shadowed by a second export. SonarQube tokens are
+  # `squ_`-prefixed alphanumerics — no characters special inside double quotes
+  # (same assumption as the JFrog token above).
+  persist_env_var_unless_set "$SONARQUBE_TOKEN_VAR" "export ${SONARQUBE_TOKEN_VAR}=\"${_tok}\""
 }
 
 # ~/.ssh with an ed25519 keypair. `make devcontainer` bind-mounts the developer's
@@ -1726,11 +1812,16 @@ main() {
   #     ~/.bash_profile and ~/.bashrc. Entered by hand (paste a JFrog Identity Token).
   run_check "JFrog credentials are exported in your shell profile" check_jfrog_creds fix_jfrog_creds required
 
-  # 14. SSH keypair — ~/.ssh with an ed25519 key, so `make devcontainer` can mount
+  # 14. LUV_SONARQUBE_TOKEN — a SonarQube user token exported in ~/.zshenv,
+  #     ~/.bash_profile and ~/.bashrc. Entered by hand (paste a token generated in
+  #     the SonarQube UI at https://sonarqube-ent.lumivero.com/).
+  run_check "LUV_SONARQUBE_TOKEN is exported in your shell profile" check_sonarqube_token fix_sonarqube_token required
+
+  # 15. SSH keypair — ~/.ssh with an ed25519 key, so `make devcontainer` can mount
   #     it into the dev container (git over SSH then works inside the container).
   run_check "SSH keypair present in ~/.ssh" check_ssh_key fix_ssh_key required
 
-  # 15. lumivero-api repository — checked out in the current directory (or we are
+  # 16. lumivero-api repository — checked out in the current directory (or we are
   #     already inside it). Depends on the GitHub CLI (9) for the private clone.
   run_check "lumivero-api repository is checked out" check_repo fix_repo required
 
