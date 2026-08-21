@@ -73,7 +73,9 @@ The OS check is always first because it sets `OS_FAMILY` (`macos` | `debian`), w
 
 Explicitly rejected: Cygwin/MinGW/MSYS bash environments, and any other distro/OS. An unsupported OS is **fatal** — `main()` bails immediately after the OS check (when `check_os` leaves `OS_FAMILY` empty) instead of running the remaining checks, since they all install via `OS_FAMILY`.
 
-WSL detection lives in the `is_wsl()` helper (checks `WSL_INTEROP`/`WSL_DISTRO_NAME` env vars and `/proc/version`). Plain WSL is sufficient — there is no separate WSLg (graphical) requirement.
+WSL detection lives in the `is_wsl()` helper (checks `WSL_INTEROP`/`WSL_DISTRO_NAME` env vars and `/proc/version`).
+
+**WSLg is a soft requirement under WSL.** `lumivero-api`'s `make browser` runs a Chromium-family browser *inside* the distro — that is what keeps the workflow identical on macOS and Windows, since the browser and Docker then sit on the same OS and the dev container's proxy is reached over plain loopback with no Windows↔WSL port relay in the path. `check_wslg` therefore reports whether a graphical application can be displayed. It is registered `optional` and has **no fix function**: WSLg ships with WSL itself, so a missing one is repaired with `wsl --update` on the Windows side, which cannot be done from inside the distro. A developer without it still completes setup.
 
 ### Presentation & interaction notes
 

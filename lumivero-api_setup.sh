@@ -847,26 +847,42 @@ install_sops_linux() {
   rm -f "$_tmp"
 }
 
-# Visual Studio Code — the editor the Dev Containers workflow runs from. It is
-# auto-installed only on Linux (Debian/Ubuntu), from Microsoft's official apt
-# repository; on macOS it is not installed for you (get it from
-# https://code.visualstudio.com/ or `brew install --cask visual-studio-code`).
-# Detected by the `code` CLI on PATH or, on macOS, the installed .app bundle —
-# VS Code on macOS ships the `code` command only after you run "Shell Command:
-# Install 'code' command in PATH", so the app can be present without it.
-check_vscode() {
-  if have_cmd code; then
-    _ver="$(code --version 2>/dev/null | head -n1)" || _ver=""
-    CHECK_DETAIL="${_ver:+v${_ver}, }installed"
-    return 0
-  fi
+# The Microsoft apt repository the browser is installed from on Debian/Ubuntu. Kept as constants so
+# check_browser's detail strings and fix_browser's sources-list line cannot drift apart.
+EDGE_APT_REPO="https://packages.microsoft.com/repos/edge"
+EDGE_APT_PACKAGE="microsoft-edge-stable"
+MS_KEYRING="/etc/apt/keyrings/packages.microsoft.gpg"
 
-  if [ "$OS_FAMILY" = "macos" ]; then
-    if [ -d "/Applications/Visual Studio Code.app" ] || [ -d "${HOME}/Applications/Visual Studio Code.app" ]; then
-      CHECK_DETAIL="app installed (the 'code' CLI is not on PATH)"
+# A Chromium-family browser — how a developer actually looks at the local stack. `make browser` in
+# lumivero-api opens the Aspire dashboard, the lumivero-api Dashboard and the embed pages through the
+# dev container's SOCKS5 proxy, and it needs a Chromium-family browser to pass the proxy flags to
+# (`--proxy-server`, `--proxy-bypass-list`). Firefox has no equivalent command-line switches and Safari
+# only honours the system-wide proxy, so neither is usable here.
+#
+# Under WSL the browser runs INSIDE the Ubuntu distro (WSLg draws the window), which is what keeps the
+# workflow identical on macOS and Windows: in both cases the browser and Docker sit on the same OS, so
+# the proxy is reached over plain loopback with no Windows<->WSL port relay in the path.
+#
+# Detected by any of the usual binary names, or on macOS the installed .app bundle — same shape as the
+# VS Code check this replaced, because a Mac browser is present as an app without being on PATH.
+check_browser() {
+  for _b in microsoft-edge microsoft-edge-stable google-chrome google-chrome-stable chromium chromium-browser; do
+    if have_cmd "$_b"; then
+      _ver="$("$_b" --version 2>/dev/null | head -n1)" || _ver=""
+      CHECK_DETAIL="${_ver:-$_b}"
       return 0
     fi
-    CHECK_DETAIL="not installed — get it from https://code.visualstudio.com/ or 'brew install --cask visual-studio-code'"
+  done
+
+  if [ "$OS_FAMILY" = "macos" ]; then
+    for _app in "/Applications/Microsoft Edge.app" "/Applications/Google Chrome.app" \
+                "${HOME}/Applications/Microsoft Edge.app" "${HOME}/Applications/Google Chrome.app"; do
+      if [ -d "$_app" ]; then
+        CHECK_DETAIL="$(basename "$_app" .app) installed"
+        return 0
+      fi
+    done
+    CHECK_DETAIL="not installed — get Microsoft Edge or Google Chrome from their download page"
     return 1
   fi
 
@@ -874,68 +890,65 @@ check_vscode() {
   return 1
 }
 
-# Install VS Code on Debian/Ubuntu from Microsoft's official apt repository
-# (https://code.visualstudio.com/docs/setup/linux) — the same keyring + sources
-# list shape as the GitHub CLI fix above. On macOS there is no automated install:
-# the developer is pointed at the download (or Homebrew cask).
-fix_vscode() {
+# Install Microsoft Edge on Debian/Ubuntu from Microsoft's official apt repository — the same keyring +
+# sources-list shape used for the other Microsoft-hosted packages. Edge rather than Ubuntu's
+# `chromium-browser`, which on noble is a snap transition package (`2:1snap1-0ubuntu2`) and pulls in
+# snapd, which is unreliable under WSL. Google Chrome from dl.google.com would work equally well; Edge
+# wins only on already trusting packages.microsoft.com. On macOS there is no automated install: the
+# developer is pointed at the download.
+fix_browser() {
   if [ "$OS_FAMILY" != "debian" ]; then
-    CHECK_DETAIL="install VS Code from https://code.visualstudio.com/ (or 'brew install --cask visual-studio-code')"
+    CHECK_DETAIL="install Microsoft Edge or Google Chrome from their download page, then re-run"
     return 1
   fi
 
-  # gpg dearmors the signing key, wget fetches it — install either if missing.
+  # gpg dearmors the signing key, curl fetches it — install either if missing.
   have_cmd gpg || run_root apt-get install -y gpg || {
-    CHECK_DETAIL="could not install gpg (needed to dearmor the VS Code signing key)"
+    CHECK_DETAIL="could not install gpg (needed to dearmor the Microsoft signing key)"
     return 1
   }
-  have_cmd wget || run_root apt-get install -y wget || {
-    CHECK_DETAIL="could not install wget (needed to fetch the VS Code signing key)"
+  have_cmd curl || run_root apt-get install -y curl || {
+    CHECK_DETAIL="could not install curl (needed to fetch the Microsoft signing key)"
     return 1
   }
 
-  run_root mkdir -p -m 755 /etc/apt/keyrings || return 1
-  wget -qO- https://packages.microsoft.com/keys/microsoft.asc \
+  # Written unconditionally rather than only when absent: the keyring is shared with any other
+  # Microsoft-hosted repo, and re-writing the same key is idempotent.
+  run_root install -d -m 0755 /etc/apt/keyrings || return 1
+  curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
     | gpg --dearmor \
-    | run_root tee /etc/apt/keyrings/packages.microsoft.gpg >/dev/null || return 1
-  run_root chmod go+r /etc/apt/keyrings/packages.microsoft.gpg || return 1
+    | run_root tee "$MS_KEYRING" >/dev/null || return 1
+  run_root chmod go+r "$MS_KEYRING" || return 1
 
+  # This sources file is a one-shot bootstrap, not persistent config: it exists only so the first
+  # `apt-get install` can find the package. Edge then takes its own repository over — its daily cron
+  # job (/etc/cron.daily/microsoft-edge) writes a deb822 microsoft-edge.sources pointing at
+  # .../repos/edge-stable and removes this .list. Verified by installing it; nothing needs rewriting
+  # afterwards, and check_browser passes from then on so this fix never runs again.
   _arch="$(dpkg --print-architecture)"
-  printf 'deb [arch=%s signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main\n' "$_arch" \
-    | run_root tee /etc/apt/sources.list.d/vscode.list >/dev/null || return 1
+  printf 'deb [arch=%s signed-by=%s] %s stable main\n' "$_arch" "$MS_KEYRING" "$EDGE_APT_REPO" \
+    | run_root tee /etc/apt/sources.list.d/microsoft-edge.list >/dev/null || return 1
 
   run_root apt-get update || return 1
-  run_root apt-get install -y code || return 1
+  run_root apt-get install -y "$EDGE_APT_PACKAGE" || return 1
 }
 
-# DONT_PROMPT_WSL_INSTALL silences the prompt VS Code shows every time `code` is
-# launched from a WSL shell ("install Visual Studio Code in Windows and uninstall
-# the Linux version in WSL"). VS Code only tests that the variable is *defined*,
-# so any value works; we export 1. It is a regular environment variable, so it
-# lives in the same shell startup files as the others (zsh ~/.zshenv; bash
-# ~/.bash_profile and ~/.bashrc). It is meaningful only under WSL — main()
-# registers this check only there (mirroring is_wsl), so the check/fix below never
-# need to re-test the platform.
-WSL_CODE_PROMPT_LINE='export DONT_PROMPT_WSL_INSTALL=1'
-
-# Satisfied when that exact line is present in every env-var file persist_env_line
-# writes (~/.zshenv, ~/.bash_profile, ~/.bashrc) — the same fixed-string test
-# ensure_line_in_file uses to append, so the check and the fix agree.
-check_wsl_code_prompt() {
-  for _rc in "${HOME}/.zshenv" "${HOME}/.bash_profile" "${HOME}/.bashrc"; do
-    if ! grep -qF "$WSL_CODE_PROMPT_LINE" "$_rc" 2>/dev/null; then
-      CHECK_DETAIL="not set in ${_rc##*/}"
-      return 1
-    fi
-  done
-  CHECK_DETAIL="DONT_PROMPT_WSL_INSTALL set in your shell startup files"
+# WSLg — the compositor that lets a Linux GUI application inside the distro draw a window on the
+# Windows desktop. Required for the browser above to be usable under WSL, and reported rather than
+# installed because it ships with WSL itself: a missing WSLg is fixed with `wsl --update` in PowerShell
+# on the Windows side, which cannot be done from inside the distro. Registered only under WSL (see
+# main), so this never needs to re-test the platform.
+check_wslg() {
+  if [ ! -d /mnt/wslg ]; then
+    CHECK_DETAIL="/mnt/wslg is absent — run 'wsl --update' in PowerShell, then 'wsl --shutdown', and reopen this shell"
+    return 1
+  fi
+  if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    CHECK_DETAIL="WSLg present but neither DISPLAY nor WAYLAND_DISPLAY is set — a browser window cannot open from this shell"
+    return 1
+  fi
+  CHECK_DETAIL="WSLg available (DISPLAY=${DISPLAY:-unset}, WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-unset})"
   return 0
-}
-
-# Persist the export line into the env-var files (idempotent append). A fixed
-# value, so there is nothing to update later.
-fix_wsl_code_prompt() {
-  persist_env_line "$WSL_CODE_PROMPT_LINE"
 }
 
 # The Azure Container Registry every developer needs pull/push access to.
@@ -1779,15 +1792,17 @@ main() {
   #    set so a multi-tool miss is fixed in a single package-manager command.
   run_check "Command-line tools installed (git, jq, make, sops)" check_cli_tools fix_cli_tools required
 
-  # 6. Visual Studio Code — the editor the Dev Containers workflow runs from.
-  #    Auto-installed on Linux only; optional, so a macOS/WSL miss just warns.
-  run_check "Visual Studio Code is installed" check_vscode fix_vscode optional
+  # 6. A Chromium-family browser — how a developer views the local stack (`make browser` drives it
+  #    through the dev container's SOCKS5 proxy, and it needs the Chromium proxy flags). Auto-installed
+  #    on Debian/Ubuntu — including inside the WSL distro, where WSLg draws the window; on macOS it is
+  #    detected but never installed. Optional, so a miss warns rather than failing setup.
+  run_check "A Chromium-family browser is installed" check_browser fix_browser optional
 
-  # 7. DONT_PROMPT_WSL_INSTALL — only under WSL, where it suppresses VS Code's
-  #    "install VS Code in Windows" prompt on every `code` launch. Optional
-  #    quality-of-life, so a miss just warns; not registered off WSL.
+  # 7. WSLg — only under WSL, where the browser above runs inside the distro and needs a compositor to
+  #    draw its window. Reported, not installed: a missing WSLg is fixed with `wsl --update` on the
+  #    Windows side. Optional, so a miss warns; not registered off WSL.
   if is_wsl; then
-    run_check "DONT_PROMPT_WSL_INSTALL is exported in your shell profile" check_wsl_code_prompt fix_wsl_code_prompt optional
+    run_check "WSLg can display a graphical application" check_wslg "" optional
   fi
 
   # 8. Azure + ACR login — signed in and able to reach the uluruscacr registry.
