@@ -851,6 +851,7 @@ install_sops_linux() {
 # check_browser's detail strings and fix_browser's sources-list line cannot drift apart.
 EDGE_APT_REPO="https://packages.microsoft.com/repos/edge"
 EDGE_APT_PACKAGE="microsoft-edge-stable"
+EMOJI_FONT_PACKAGE="fonts-noto-color-emoji"
 MS_KEYRING="/etc/apt/keyrings/packages.microsoft.gpg"
 
 # A Chromium-family browser — how a developer actually looks at the local stack. `make browser` in
@@ -865,11 +866,28 @@ MS_KEYRING="/etc/apt/keyrings/packages.microsoft.gpg"
 #
 # Detected by any of the usual binary names, or on macOS the installed .app bundle — same shape as the
 # VS Code check this replaced, because a Mac browser is present as an app without being on PATH.
-check_browser() {
+# Does this machine have a colour-emoji font? Asks fontconfig to resolve the generic `emoji` family —
+# the same mechanism the browser uses — and compares it with what fontconfig returns for a family that
+# cannot match anything. Equal means the emoji request fell through to the generic text fallback, i.e.
+# nothing is installed.
+#
+# Deliberately NOT `fc-list :charset=1f600`: DejaVu Sans covers U+1F600-1F640 as MONOCHROME glyphs, so
+# a charset test passes on a machine with no colour emoji at all (measured). Deliberately NOT a list of
+# known family names either — that would miss JoyPixels or OpenMoji.
+emoji_font_present() {
+  have_cmd fc-match || return 1
+  _emoji_family="$(fc-match -f '%{family}' emoji 2>/dev/null || true)"
+  _fallback_family="$(fc-match -f '%{family}' luv-no-such-family 2>/dev/null || true)"
+  [ -n "$_emoji_family" ] && [ "$_emoji_family" != "$_fallback_family" ]
+}
+
+# The installed browser, as a printable string, or empty when there is none. On macOS a browser is
+# present as an .app bundle without being on PATH, so both are probed.
+browser_description() {
   for _b in microsoft-edge microsoft-edge-stable google-chrome google-chrome-stable chromium chromium-browser; do
     if have_cmd "$_b"; then
       _ver="$("$_b" --version 2>/dev/null | head -n1)" || _ver=""
-      CHECK_DETAIL="${_ver:-$_b}"
+      printf '%s\n' "${_ver:-$_b}"
       return 0
     fi
   done
@@ -878,16 +896,36 @@ check_browser() {
     for _app in "/Applications/Microsoft Edge.app" "/Applications/Google Chrome.app" \
                 "${HOME}/Applications/Microsoft Edge.app" "${HOME}/Applications/Google Chrome.app"; do
       if [ -d "$_app" ]; then
-        CHECK_DETAIL="$(basename "$_app" .app) installed"
+        printf '%s installed\n' "$(basename "$_app" .app)"
         return 0
       fi
     done
-    CHECK_DETAIL="not installed — get Microsoft Edge or Google Chrome from their download page"
+  fi
+
+  return 1
+}
+
+check_browser() {
+  if ! _browser="$(browser_description)"; then
+    if [ "$OS_FAMILY" = "macos" ]; then
+      CHECK_DETAIL="not installed — get Microsoft Edge or Google Chrome from their download page"
+    else
+      CHECK_DETAIL="not installed"
+    fi
     return 1
   fi
 
-  CHECK_DETAIL="not installed"
-  return 1
+  # A browser that cannot render the app's emoji is only half a browser: every emoji in the Aspire
+  # dashboard and the lumivero-api Dashboard comes out as an empty box. macOS is exempt because Apple
+  # Color Emoji is part of the system; under WSL the browser runs inside the distro, where a minimal
+  # Ubuntu install ships no colour-emoji font at all.
+  if [ "$OS_FAMILY" != "macos" ] && ! emoji_font_present; then
+    CHECK_DETAIL="${_browser}, but no colour-emoji font — emoji render as empty boxes"
+    return 1
+  fi
+
+  CHECK_DETAIL="$_browser"
+  return 0
 }
 
 # Install Microsoft Edge on Debian/Ubuntu from Microsoft's official apt repository — the same keyring +
@@ -900,6 +938,24 @@ fix_browser() {
   if [ "$OS_FAMILY" != "debian" ]; then
     CHECK_DETAIL="install Microsoft Edge or Google Chrome from their download page, then re-run"
     return 1
+  fi
+
+  # The emoji font first, and on its own: it is a plain archive package, so a machine that already has
+  # a browser and only lacks the font never touches the Microsoft repository below.
+  if ! emoji_font_present; then
+    install_pkg "" "$EMOJI_FONT_PACKAGE" || {
+      CHECK_DETAIL="could not install ${EMOJI_FONT_PACKAGE}"
+      return 1
+    }
+    # apt's own trigger normally rebuilds the fontconfig cache; refreshing it here costs nothing and
+    # covers the case where it did not, since a font the cache has not seen is invisible to the browser.
+    if have_cmd fc-cache; then
+      fc-cache -f >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if browser_description >/dev/null; then
+    return 0
   fi
 
   # gpg dearmors the signing key, curl fetches it — install either if missing.
@@ -1795,8 +1851,10 @@ main() {
   # 6. A Chromium-family browser — how a developer views the local stack (`make browser` drives it
   #    through the dev container's SOCKS5 proxy, and it needs the Chromium proxy flags). Auto-installed
   #    on Debian/Ubuntu — including inside the WSL distro, where WSLg draws the window; on macOS it is
-  #    detected but never installed. Optional, so a miss warns rather than failing setup.
-  run_check "A Chromium-family browser is installed" check_browser fix_browser optional
+  #    detected but never installed. The colour-emoji font goes with it: without one every emoji in the
+  #    dashboards renders as an empty box, and a minimal Ubuntu ships no such font (macOS has Apple
+  #    Color Emoji built in). Optional, so a miss warns rather than failing setup.
+  run_check "A Chromium-family browser and colour-emoji font are installed" check_browser fix_browser optional
 
   # 7. WSLg — only under WSL, where the browser above runs inside the distro and needs a compositor to
   #    draw its window. Reported, not installed: a missing WSLg is fixed with `wsl --update` on the
